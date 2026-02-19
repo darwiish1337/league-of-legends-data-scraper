@@ -11,7 +11,6 @@ class DataPersistenceService:
     
     Responsibilities:
     - Initialize and evolve schema safely (idempotent migrations)
-    - Reset DB for clean runs
     - Insert normalized match/team/participant data
     - Seed static Data Dragon metadata (items, summoner spells, champions)
     - Export result tables to CSV files for analysis
@@ -88,21 +87,7 @@ class DataPersistenceService:
         except:
             pass
 
-    def reset_db(self) -> None:
-        # Clear all tables to start fresh
-        cur = self._conn.cursor()
-        for table in [
-            "participant_items",
-            "participant_summoner_spells",
-            "participants",
-            "teams",
-            "matches",
-            "champions",
-            "items",
-            "summoner_spells",
-        ]:
-            cur.execute(f"DELETE FROM {table}")
-        self._conn.commit()
+    # Removed destructive reset to preserve accumulated data
 
     def save_raw_matches(self, matches: List[Match]) -> None:
         # Insert raw match, team, participant data and normalize items/spells

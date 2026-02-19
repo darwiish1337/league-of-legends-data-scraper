@@ -6,6 +6,7 @@ from domain.enums import Region, QueueType
 from infrastructure import RiotAPIClient, SummonerRepository
 from application import ScrapeMatchesUseCase
 from application.services import DataPersistenceService
+from core.logging.logger import get_logger
 
 
 class ScraperCLI:
@@ -13,6 +14,7 @@ class ScraperCLI:
     
     def __init__(self) -> None:
         self._target = settings.MATCHES_PER_REGION
+        self._log = get_logger(__name__, service="cli")
     
     def _print_banner(self) -> None:
         print("""
@@ -48,12 +50,12 @@ class ScraperCLI:
     async def run(self) -> None:
         settings.validate()
         settings.create_directories()
+        self._log.info("start")
         regions = Region.all_regions()
         queues = QueueType.ranked_queues()
         
         db_path = settings.DB_DIR / "scraper.sqlite"
         p = DataPersistenceService(db_path)
-        p.reset_db()
         try:
             p.seed_static_data()
         except Exception:
@@ -73,6 +75,7 @@ class ScraperCLI:
                 self._target = settings.MATCHES_PER_REGION
                 print("")
                 print(f"Server: {region.friendly}", flush=True)
+                self._log.info(f"region-start {region.value}")
                 if idx + 1 < len(regions):
                     print(f"Next Server: {regions[idx + 1].friendly}", flush=True)
                 width = 30
@@ -104,6 +107,7 @@ class ScraperCLI:
                                 if getattr(rv, "puuid", None):
                                     puuids.append(rv.puuid)
                     except Exception:
+                        self._log.warning(f"seed-fetch-failed {region.value}")
                         pass
                     if len(puuids) >= 5:
                         break
@@ -127,6 +131,7 @@ class ScraperCLI:
                                 if getattr(rv, "puuid", None):
                                     puuids.append(rv.puuid)
                     except Exception:
+                        self._log.warning(f"seed-flex-fallback-failed {region.value}")
                         pass
                 seeds_for_region = list(dict.fromkeys(puuids))[:5]
                 
@@ -143,6 +148,7 @@ class ScraperCLI:
                     for matches in region_data.values():
                         region_matches.extend(matches)
                 total_all += len(region_matches)
+                self._log.success(f"region-complete {region.value} count={len(region_matches)}")
                 print("")
                 print(f"\nData collection complete for {region.value}! Collected {len(region_matches)} matches")
                 print("Saving matches to database...")
@@ -150,5 +156,6 @@ class ScraperCLI:
                 print("Exporting tables to CSV...")
                 p.export_tables_csv(settings.CSV_DIR)
             
+            self._log.info(f"all-done total={total_all}")
             print(f"\nAll done! Total collected: {total_all}. Check the 'data/db' and 'data/csv' directories for results.")
 

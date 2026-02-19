@@ -1,7 +1,6 @@
 """Presentation layer - User interfaces."""
-from .cli import CLI, main
+from .cli import ScraperCLI
 
 __all__ = [
-    'CLI',
-    'main',
+    'ScraperCLI',
 ]
