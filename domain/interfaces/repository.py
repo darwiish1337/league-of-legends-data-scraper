@@ -40,8 +40,3 @@ class ISummonerRepository(ABC):
     async def get_summoner_by_puuid(self, region: Region, puuid: str) -> Optional[Summoner]:
         """Get summoner by PUUID."""
         pass
-    
-    @abstractmethod
-    async def get_summoner_rank_info(self, region: Region, summoner_id: str) -> dict:
-        """Get summoner ranked information."""
-        pass

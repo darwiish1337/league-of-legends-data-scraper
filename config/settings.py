@@ -4,28 +4,40 @@ from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
 
-# Load environment variables from config/.env
+# Load environment variables from config/.env (API key only)
 ENV_PATH = Path(__file__).resolve().parent / '.env'
 load_dotenv(dotenv_path=ENV_PATH)
 
 
 class Settings:
-    """Application settings loaded from environment variables."""
+    """Application settings loaded from environment variables.
     
+    Centralizes:
+    - API key and request/timeout policies
+    - Rate limiting per endpoint
+    - Target patch/date windows
+    - Data directories
+    - Per-region collection targets and limits
+    """
+
     # API Configuration
     RIOT_API_KEY: str = os.getenv('RIOT_API_KEY', '')
     
     # Rate Limiting (per 10 seconds / per 10 minutes)
-    RATE_LIMIT_PER_10_SEC: int = int(os.getenv('RATE_LIMIT_PER_10_SEC', '20'))
-    RATE_LIMIT_PER_10_MIN: int = int(os.getenv('RATE_LIMIT_PER_10_MIN', '100'))
+    RATE_LIMIT_PER_10_SEC: int = 20
+    RATE_LIMIT_PER_10_MIN: int = 100
+    MATCH_RATE_LIMIT_PER_10_SEC: int = 6
+    MATCH_RATE_LIMIT_PER_10_MIN: int = 60
+    SUMMONER_RATE_LIMIT_PER_10_SEC: int = 20
+    SUMMONER_RATE_LIMIT_PER_10_MIN: int = 100
+    LEAGUE_RATE_LIMIT_PER_10_SEC: int = 10
+    LEAGUE_RATE_LIMIT_PER_10_MIN: int = 100
     
     # Patch Configuration
-    TARGET_PATCH: str = os.getenv('TARGET_PATCH', '26.01')
+    TARGET_PATCH: str = os.getenv('TARGET_PATCH', '16.3')
     
-    # Patch 26.01 dates (approximate)
-    # Default window for current patch scraping
-    PATCH_START_DATE: str = os.getenv('PATCH_START_DATE', '2026-02-01')
-    PATCH_END_DATE: Optional[str] = os.getenv('PATCH_END_DATE', None)  # None = current
+    PATCH_START_DATE: str = os.getenv('PATCH_START_DATE', '2020-01-01')
+    PATCH_END_DATE: str = os.getenv('PATCH_END_DATE', '')
     
     # Data paths
     BASE_DIR: Path = Path(__file__).resolve().parent.parent
@@ -34,24 +46,29 @@ class Settings:
     CSV_DIR: Path = DATA_DIR / 'csv'
     LOG_DIR: Path = DATA_DIR / 'logs'
     
-    # API endpoints
-    RIOT_API_BASE: str = "https://{platform}.api.riotgames.com"
-    RIOT_REGIONAL_BASE: str = "https://{region}.api.riotgames.com"
-    
     # Request configuration
-    REQUEST_TIMEOUT: int = int(os.getenv('REQUEST_TIMEOUT', '30'))
-    MAX_RETRIES: int = int(os.getenv('MAX_RETRIES', '3'))
-    RETRY_BACKOFF: float = float(os.getenv('RETRY_BACKOFF', '2.0'))
+    REQUEST_TIMEOUT: int = 30
+    MAX_RETRIES: int = 3
+    RETRY_BACKOFF: float = 2.0
     
     # Concurrent requests
-    MAX_CONCURRENT_REQUESTS: int = int(os.getenv('MAX_CONCURRENT_REQUESTS', '10'))
+    MAX_CONCURRENT_REQUESTS: int = 4
     
     # Match scraping
     MATCHES_PER_SUMMONER: int = int(os.getenv('MATCHES_PER_SUMMONER', '100'))
-    ENRICH_RANKS: bool = os.getenv('ENRICH_RANKS', '0') in ('1', 'true', 'True')
+    MATCHES_PER_REGION: int = 50
+    MATCHES_TOTAL: Optional[int] = int(os.getenv('MATCHES_TOTAL', '0')) or None
+    IDS_PER_PUUID: int = 10
+    
+
+    # Scraping mode
+    SCRAPE_MODE: str = 'patch'
+    SCRAPE_DATE: Optional[str] = None
+    SEED_PUUIDS: str = ''     # Optional comma-separated PUUIDs to bootstrap
+    SEED_SUMMONERS: str = ''  # Optional comma-separated summoner names to bootstrap
     
     # Logging
-    LOG_LEVEL: str = os.getenv('LOG_LEVEL', 'INFO')
+    LOG_LEVEL: str = 'INFO'  # Global log level for optional loggers
     
     @classmethod
     def validate(cls) -> None:

@@ -40,18 +40,18 @@ class RiotAPIClient:
         """Setup rate limiters for specific endpoints."""
         self.rate_limiter.add_endpoint_limiter(
             "match",
-            requests_per_10_sec=settings.RATE_LIMIT_PER_10_SEC,
-            requests_per_10_min=settings.RATE_LIMIT_PER_10_MIN
+            requests_per_10_sec=settings.MATCH_RATE_LIMIT_PER_10_SEC,
+            requests_per_10_min=settings.MATCH_RATE_LIMIT_PER_10_MIN
         )
         self.rate_limiter.add_endpoint_limiter(
             "summoner",
-            requests_per_10_sec=settings.RATE_LIMIT_PER_10_SEC,
-            requests_per_10_min=settings.RATE_LIMIT_PER_10_MIN
+            requests_per_10_sec=settings.SUMMONER_RATE_LIMIT_PER_10_SEC,
+            requests_per_10_min=settings.SUMMONER_RATE_LIMIT_PER_10_MIN
         )
         self.rate_limiter.add_endpoint_limiter(
             "league",
-            requests_per_10_sec=settings.RATE_LIMIT_PER_10_SEC,
-            requests_per_10_min=settings.RATE_LIMIT_PER_10_MIN
+            requests_per_10_sec=settings.LEAGUE_RATE_LIMIT_PER_10_SEC,
+            requests_per_10_min=settings.LEAGUE_RATE_LIMIT_PER_10_MIN
         )
     
     async def __aenter__(self):
@@ -99,6 +99,9 @@ class RiotAPIClient:
                 
                 response = await self.session.get(url)
                 self.last_status_code = response.status_code
+                if response.status_code == 401:
+                    logger.error("Unauthorized (401). Check RIOT_API_KEY or header.")
+                    return None
                 if response.status_code == 429:
                     retry_after = int(response.headers.get('Retry-After', '1'))
                     logger.warning(f"Rate limited. Retrying after {retry_after}s. URL: {url}")
@@ -240,6 +243,22 @@ class RiotAPIClient:
         return await self._make_request(url, "summoner")
     
     # ==================== League API ====================
+    async def get_league_entries(
+        self,
+        region: Region,
+        queue: QueueType,
+        tier: str,
+        division: str,
+        page: int = 1
+    ) -> Optional[List[Dict[Any, Any]]]:
+        """
+        Get league entries for a queue, tier, and division (paged).
+        Endpoint: /lol/league/v4/entries/{queue}/{tier}/{division}?page={page}
+        """
+        base_url = self._get_platform_url(region)
+        queue_name = "RANKED_SOLO_5x5" if queue == QueueType.RANKED_SOLO_5x5 else "RANKED_FLEX_SR"
+        url = f"{base_url}/lol/league/v4/entries/{queue_name}/{tier}/{division}?page={page}"
+        return await self._make_request(url, "league")
     
     async def get_league_entries_by_summoner(
         self,
@@ -297,8 +316,7 @@ class RiotAPIClient:
             Challenger league data or None
         """
         base_url = self._get_platform_url(region)
-        queue_name = "RANKED_SOLO_5x5" if queue == QueueType.RANKED_SOLO_5x5 else "RANKED_FLEX_SR"
-        url = f"{base_url}/lol/league/v4/challengerleagues/by-queue/{queue_name}"
+        url = f"{base_url}/lol/league/v4/challengerleagues/by-queue/{queue.api_queue_name}"
         
         return await self._make_request(url, "league")
     
@@ -318,8 +336,7 @@ class RiotAPIClient:
             Grandmaster league data or None
         """
         base_url = self._get_platform_url(region)
-        queue_name = "RANKED_SOLO_5x5" if queue == QueueType.RANKED_SOLO_5x5 else "RANKED_FLEX_SR"
-        url = f"{base_url}/lol/league/v4/grandmasterleagues/by-queue/{queue_name}"
+        url = f"{base_url}/lol/league/v4/grandmasterleagues/by-queue/{queue.api_queue_name}"
         
         return await self._make_request(url, "league")
     
@@ -339,7 +356,18 @@ class RiotAPIClient:
             Master league data or None
         """
         base_url = self._get_platform_url(region)
-        queue_name = "RANKED_SOLO_5x5" if queue == QueueType.RANKED_SOLO_5x5 else "RANKED_FLEX_SR"
-        url = f"{base_url}/lol/league/v4/masterleagues/by-queue/{queue_name}"
+        url = f"{base_url}/lol/league/v4/masterleagues/by-queue/{queue.api_queue_name}"
         
+        return await self._make_request(url, "league")
+
+    async def get_league_entries(
+        self,
+        region: Region,
+        queue: QueueType,
+        tier: str,
+        division: str,
+        page: int = 1
+    ) -> Optional[List[Dict[Any, Any]]]:
+        base_url = self._get_platform_url(region)
+        url = f"{base_url}/lol/league/v4/entries/{queue.api_queue_name}/{tier}/{division}?page={page}"
         return await self._make_request(url, "league")

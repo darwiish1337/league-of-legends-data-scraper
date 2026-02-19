@@ -9,7 +9,7 @@ class Role(Enum):
     JUNGLE = "JUNGLE"
     MIDDLE = "MIDDLE"
     BOTTOM = "BOTTOM"
-    UTILITY = "UTILITY"  # Support
+    SUPPORT = "SUPPORT"
     
     @property
     def position_name(self) -> str:
@@ -24,7 +24,7 @@ class Role(Enum):
             "JUNGLE": "jg",
             "MIDDLE": "mid",
             "BOTTOM": "adc",
-            "UTILITY": "sup"
+            "SUPPORT": "sup"
         }
         return short_names[self.value]
     
@@ -41,8 +41,9 @@ class Role(Enum):
         except KeyError:
             # Try mapping common variations
             mappings = {
-                "SUPPORT": cls.UTILITY,
-                "SUP": cls.UTILITY,
+                "SUPPORT": cls.SUPPORT,
+                "SUP": cls.SUPPORT,
+                "UTILITY": cls.SUPPORT,
                 "ADC": cls.BOTTOM,
                 "BOT": cls.BOTTOM,
                 "MID": cls.MIDDLE,

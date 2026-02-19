@@ -78,24 +78,22 @@ class MatchRepository(IMatchRepository):
         info = data['info']
         
         # Parse queue type
-        queue_id = info['queueId']
+        queue_id = info.get('queueId', 0)
         queue_type = (
             QueueType.RANKED_SOLO_5x5 if queue_id == 420 
             else QueueType.RANKED_FLEX_SR
         )
         
         # Parse teams
-        teams_data = info['teams']
-        team_100 = self._parse_team_data(
-            next(t for t in teams_data if t['teamId'] == 100)
-        )
-        team_200 = self._parse_team_data(
-            next(t for t in teams_data if t['teamId'] == 200)
-        )
+        teams_data = info.get('teams', [])
+        team_100_data = next((t for t in teams_data if t.get('teamId') == 100), {'teamId': 100, 'win': False})
+        team_200_data = next((t for t in teams_data if t.get('teamId') == 200), {'teamId': 200, 'win': False})
+        team_100 = self._parse_team_data(team_100_data)
+        team_200 = self._parse_team_data(team_200_data)
         
         # Parse participants
         participants = []
-        for p_data in info['participants']:
+        for p_data in info.get('participants', []):
             participant = self._parse_participant_data(p_data)
             participants.append(participant)
         
@@ -105,19 +103,19 @@ class MatchRepository(IMatchRepository):
         
         # Create match entity
         match = Match(
-            match_id=metadata['matchId'],
-            game_id=info['gameId'],
+            match_id=metadata.get('matchId', ''),
+            game_id=info.get('gameId', 0),
             region=region,
-            platform_id=info['platformId'],
+            platform_id=info.get('platformId', region.value),
             queue_id=queue_id,
             queue_type=queue_type,
-            game_creation=info['gameCreation'],
-            game_start_timestamp=info['gameStartTimestamp'],
-            game_end_timestamp=info['gameEndTimestamp'],
-            game_duration=info['gameDuration'],
-            game_version=info['gameVersion'],
-            game_mode=info['gameMode'],
-            game_type=info['gameType'],
+            game_creation=info.get('gameCreation', 0),
+            game_start_timestamp=info.get('gameStartTimestamp', info.get('gameCreation', 0)),
+            game_end_timestamp=info.get('gameEndTimestamp', info.get('gameCreation', 0) + info.get('gameDuration', 0) * 1000),
+            game_duration=info.get('gameDuration', 0),
+            game_version=info.get('gameVersion', ''),
+            game_mode=info.get('gameMode', ''),
+            game_type=info.get('gameType', ''),
             team_100=team_100,
             team_200=team_200,
             participants=participants
@@ -130,8 +128,8 @@ class MatchRepository(IMatchRepository):
         objectives = team_data.get('objectives', {})
         
         return Team(
-            team_id=team_data['teamId'],
-            win=team_data['win'],
+            team_id=team_data.get('teamId', 0),
+            win=team_data.get('win', False),
             # Dragons
             dragon_kills=objectives.get('dragon', {}).get('kills', 0),
             first_dragon=objectives.get('dragon', {}).get('first', False),
@@ -170,37 +168,37 @@ class MatchRepository(IMatchRepository):
             team_position = Role.BOTTOM
         
         return Participant(
-            puuid=p_data['puuid'],
-            summoner_name=p_data['summonerName'],
-            summoner_id=p_data['summonerId'],
-            summoner_level=p_data['summonerLevel'],
-            team_id=p_data['teamId'],
-            participant_id=p_data['participantId'],
-            champion_id=p_data['championId'],
-            champion_name=p_data['championName'],
+            puuid=p_data.get('puuid', ''),
+            summoner_name=p_data.get('summonerName', ''),
+            summoner_id=p_data.get('summonerId', ''),
+            summoner_level=p_data.get('summonerLevel', 0),
+            team_id=p_data.get('teamId', 0),
+            participant_id=p_data.get('participantId', 0),
+            champion_id=p_data.get('championId', 0),
+            champion_name=p_data.get('championName', ''),
             individual_position=position,
             team_position=team_position,
             # Summoner spells
             summoner1_id=p_data.get('summoner1Id', 0),
             summoner2_id=p_data.get('summoner2Id', 0),
             # Game outcome
-            win=p_data['win'],
-            kills=p_data['kills'],
-            deaths=p_data['deaths'],
-            assists=p_data['assists'],
+            win=p_data.get('win', False),
+            kills=p_data.get('kills', 0),
+            deaths=p_data.get('deaths', 0),
+            assists=p_data.get('assists', 0),
             # Gold & XP
-            gold_earned=p_data['goldEarned'],
-            gold_spent=p_data['goldSpent'],
-            total_minions_killed=p_data['totalMinionsKilled'],
+            gold_earned=p_data.get('goldEarned', 0),
+            gold_spent=p_data.get('goldSpent', 0),
+            total_minions_killed=p_data.get('totalMinionsKilled', 0),
             champion_experience=p_data.get('champExperience', 0),
             # Damage
-            total_damage_dealt_to_champions=p_data['totalDamageDealtToChampions'],
-            total_damage_taken=p_data['totalDamageTaken'],
+            total_damage_dealt_to_champions=p_data.get('totalDamageDealtToChampions', 0),
+            total_damage_taken=p_data.get('totalDamageTaken', 0),
             physical_damage_dealt_to_champions=p_data.get('physicalDamageDealtToChampions', 0),
             magic_damage_dealt_to_champions=p_data.get('magicDamageDealtToChampions', 0),
             true_damage_dealt_to_champions=p_data.get('trueDamageDealtToChampions', 0),
             # Vision
-            vision_score=p_data['visionScore'],
+            vision_score=p_data.get('visionScore', 0),
             wards_placed=p_data.get('wardsPlaced', 0),
             wards_killed=p_data.get('wardsKilled', 0),
             vision_wards_bought_in_game=p_data.get('visionWardsBoughtInGame', 0),

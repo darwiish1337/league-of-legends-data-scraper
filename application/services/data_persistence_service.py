@@ -7,6 +7,15 @@ from domain.entities import Match
 from domain.enums import Role
 
 class DataPersistenceService:
+    """Lightweight persistence layer for SQLite + CSV exports.
+    
+    Responsibilities:
+    - Initialize and evolve schema safely (idempotent migrations)
+    - Reset DB for clean runs
+    - Insert normalized match/team/participant data
+    - Seed static Data Dragon metadata (items, summoner spells, champions)
+    - Export result tables to CSV files for analysis
+    """
     def __init__(self, db_path: Path):
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -17,6 +26,7 @@ class DataPersistenceService:
         self._create_tables()
 
     def _create_tables(self) -> None:
+        # Create core tables and add evolving columns safely
         cur = self._conn.cursor()
         cur.execute(
             "CREATE TABLE IF NOT EXISTS matches (match_id TEXT PRIMARY KEY, region TEXT, platform_id TEXT, queue_id INTEGER, queue_type TEXT, game_version TEXT, patch_version TEXT, game_creation INTEGER, game_start_timestamp INTEGER, game_end_timestamp INTEGER, game_duration INTEGER, match_date TEXT, match_date_simple TEXT, duration_mmss TEXT)"
@@ -36,6 +46,7 @@ class DataPersistenceService:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_participants_match ON participants(match_id)")
         self._conn.commit()
         try:
+            # Add new columns to existing tables when upgrading schema
             cols = {c[1] for c in cur.execute("PRAGMA table_info(matches)").fetchall()}
             if "match_date" not in cols:
                 cur.execute("ALTER TABLE matches ADD COLUMN match_date TEXT")
@@ -78,6 +89,7 @@ class DataPersistenceService:
             pass
 
     def reset_db(self) -> None:
+        # Clear all tables to start fresh
         cur = self._conn.cursor()
         for table in [
             "participant_items",
@@ -93,6 +105,7 @@ class DataPersistenceService:
         self._conn.commit()
 
     def save_raw_matches(self, matches: List[Match]) -> None:
+        # Insert raw match, team, participant data and normalize items/spells
         cur = self._conn.cursor()
         match_rows = []
         team_rows = []
@@ -102,6 +115,7 @@ class DataPersistenceService:
         spell_rows = {}
         part_item_rows = []
         part_spell_rows = []
+        # Minimal spell name mapping; full names are seeded via Data Dragon
         spell_names = {
             1: "Cleanse",
             3: "Exhaust",
@@ -115,6 +129,7 @@ class DataPersistenceService:
             21: "Barrier"
         }
         for m in matches:
+            # Render simple date and mm:ss duration for reporting
             simple_date = f"{m.game_date.day}/{m.game_date.month}/{m.game_date.year}"
             mm = int(m.game_duration // 60)
             ss = int(m.game_duration % 60)
@@ -156,8 +171,6 @@ class DataPersistenceService:
                 )
             for p in m.participants:
                 pos = p.individual_position.value if p.individual_position else None
-                if pos == Role.UTILITY.value:
-                    pos = "SUPPORT"
                 rank_tier = p.rank_tier.value if p.rank_tier else "UNRANKED"
                 rank_div = p.rank_division or ""
                 participant_rows.append(
@@ -236,6 +249,7 @@ class DataPersistenceService:
         self._conn.commit()
 
     def seed_static_data(self) -> None:
+        # Seed items, summoner spells, and champions with role hints from Data Dragon
         cur = self._conn.cursor()
         try:
             ver_resp = httpx.get("https://ddragon.leagueoflegends.com/api/versions.json", timeout=30)
@@ -316,6 +330,7 @@ class DataPersistenceService:
         self._conn.commit()
 
     def export_tables_csv(self, output_dir: Path) -> Dict[str, Path]:
+        # Export all tables to CSV files for easy consumption
         output_dir.mkdir(parents=True, exist_ok=True)
         paths: Dict[str, Path] = {}
         cur = self._conn.cursor()
@@ -333,7 +348,7 @@ class DataPersistenceService:
             p = output_dir / f"{name}.csv"
             rows = cur.execute(q).fetchall()
             cols = [d[0] for d in cur.description] if cur.description else []
-            with open(p, "w", newline="") as f:
+            with open(p, "w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
                 if cols:
                     w.writerow(cols)
@@ -341,3 +356,19 @@ class DataPersistenceService:
                     w.writerow(r)
             paths[name] = p
         return paths
+
+    def get_existing_match_ids(self) -> list[str]:
+        cur = self._conn.cursor()
+        try:
+            rows = cur.execute("SELECT match_id FROM matches").fetchall()
+            return [r[0] for r in rows] if rows else []
+        except Exception:
+            return []
+
+    def get_existing_puuids(self) -> list[str]:
+        cur = self._conn.cursor()
+        try:
+            rows = cur.execute("SELECT DISTINCT puuid FROM participants").fetchall()
+            return [r[0] for r in rows if r and r[0]] if rows else []
+        except Exception:
+            return []

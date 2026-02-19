@@ -3,7 +3,13 @@ from enum import Enum
 
 
 class Region(Enum):
-    """League of Legends regional servers."""
+    """League of Legends regional servers.
+    
+    Provides:
+    - platform_route: platform host (e.g., euw1)
+    - regional_route: routing host for match/account APIs (e.g., europe)
+    - friendly: short human-friendly label for CLI (e.g., eune)
+    """
     
     # Europe
     EUW1 = "euw1"  # Europe West
@@ -67,6 +73,33 @@ class Region(Enum):
             "vn2": "sea",
         }
         return regional_mapping.get(self.value, "americas")
+    
+    @property
+    def friendly(self) -> str:
+        """Get a human-friendly short label for console output."""
+        mapping = {
+            "eun1": "eune",
+            "euw1": "euw",
+            "na1": "na",
+            "br1": "br",
+            "la1": "lan",
+            "la2": "las",
+            "jp1": "jp",
+            "oc1": "oce",
+            "ph2": "ph",
+            "sg2": "sg",
+            "th2": "th",
+            "tw2": "tw",
+            "vn2": "vn",
+            "tr1": "tr",
+            "me1": "me",
+        }
+        if self.value in mapping:
+            return mapping[self.value]
+        code = self.value
+        if code and code[-1].isdigit():
+            return code[:-1]
+        return code
     
     @classmethod
     def all_regions(cls) -> list['Region']:

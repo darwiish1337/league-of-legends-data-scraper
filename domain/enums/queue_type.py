@@ -3,7 +3,13 @@ from enum import Enum
 
 
 class QueueType(Enum):
-    """Ranked queue types in League of Legends."""
+    """Ranked queue types in League of Legends.
+    
+    Provides:
+    - queue_id: numeric queue id for match filters
+    - queue_name: human-readable name
+    - api_queue_name: string used by league endpoints
+    """
     
     RANKED_SOLO_5x5 = 420  # Solo/Duo Queue
     RANKED_FLEX_SR = 440   # Flex 5v5 Queue
@@ -21,6 +27,11 @@ class QueueType(Enum):
             440: "Ranked Flex 5v5"
         }
         return names[self.value]
+    
+    @property
+    def api_queue_name(self) -> str:
+        """Get queue name string used in /league endpoints."""
+        return "RANKED_SOLO_5x5" if self == QueueType.RANKED_SOLO_5x5 else "RANKED_FLEX_SR"
     
     @classmethod
     def ranked_queues(cls) -> list['QueueType']:

@@ -1,5 +1,9 @@
-"""Main entry point for the Riot Games LoL Data Scraper."""
-from presentation.cli import main
+import asyncio
+from presentation.cli import ScraperCLI
+
+async def _run():
+    cli = ScraperCLI()
+    await cli.run()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(_run())
