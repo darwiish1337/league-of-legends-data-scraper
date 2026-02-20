@@ -56,7 +56,13 @@ class RiotAPIClient:
     
     async def __aenter__(self):
         """Async context manager entry."""
-        self.session = httpx.AsyncClient(timeout=self.timeout, headers={'X-Riot-Token': self.api_key})
+        http2_flag = False
+        try:
+            import h2  # type: ignore
+            http2_flag = True
+        except Exception:
+            http2_flag = False
+        self.session = httpx.AsyncClient(timeout=self.timeout, headers={'X-Riot-Token': self.api_key}, http2=http2_flag)
         return self
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -71,6 +77,26 @@ class RiotAPIClient:
     def _get_regional_url(self, region: Region) -> str:
         """Get regional base URL for account/match APIs."""
         return f"https://{region.regional_route}.api.riotgames.com"
+
+    def _platform_host_candidates(self, region: Region) -> list[str]:
+        """
+        For SEA platforms where some subdomains may not resolve (e.g., ph2),
+        try alternative SEA platform hosts as fallbacks to retrieve seed data.
+        """
+        if region.regional_route == "sea":
+            order = [region.platform_route, "sg2", "th2", "tw2", "vn2", "oc1"]
+            seen = set()
+            return [h for h in order if not (h in seen or seen.add(h))]
+        return [region.platform_route]
+
+    async def _request_platform_with_fallback(self, region: Region, path_suffix: str, endpoint_type: str) -> Optional[Dict[Any, Any]]:
+        for host in self._platform_host_candidates(region):
+            base = f"https://{host}.api.riotgames.com"
+            url = f"{base}{path_suffix}"
+            data = await self._make_request(url, endpoint_type)
+            if data is not None:
+                return data
+        return None
     
     async def _make_request(
         self,
@@ -219,28 +245,24 @@ class RiotAPIClient:
         Returns:
             Summoner data or None
         """
-        base_url = self._get_platform_url(region)
-        url = f"{base_url}/lol/summoner/v4/summoners/by-puuid/{puuid}"
-        
-        return await self._make_request(url, "summoner")
+        path = f"/lol/summoner/v4/summoners/by-puuid/{puuid}"
+        return await self._request_platform_with_fallback(region, path, "summoner")
     
     async def get_summoner_by_id(
         self,
         region: Region,
         summoner_id: str
     ) -> Optional[Dict[Any, Any]]:
-        base_url = self._get_platform_url(region)
-        url = f"{base_url}/lol/summoner/v4/summoners/{summoner_id}"
-        return await self._make_request(url, "summoner")
+        path = f"/lol/summoner/v4/summoners/{summoner_id}"
+        return await self._request_platform_with_fallback(region, path, "summoner")
     
     async def get_summoner_by_name(
         self,
         region: Region,
         summoner_name: str
     ) -> Optional[Dict[Any, Any]]:
-        base_url = self._get_platform_url(region)
-        url = f"{base_url}/lol/summoner/v4/summoners/by-name/{summoner_name}"
-        return await self._make_request(url, "summoner")
+        path = f"/lol/summoner/v4/summoners/by-name/{summoner_name}"
+        return await self._request_platform_with_fallback(region, path, "summoner")
     
     # ==================== League API ====================
     async def get_league_entries(
@@ -255,10 +277,10 @@ class RiotAPIClient:
         Get league entries for a queue, tier, and division (paged).
         Endpoint: /lol/league/v4/entries/{queue}/{tier}/{division}?page={page}
         """
-        base_url = self._get_platform_url(region)
         queue_name = "RANKED_SOLO_5x5" if queue == QueueType.RANKED_SOLO_5x5 else "RANKED_FLEX_SR"
-        url = f"{base_url}/lol/league/v4/entries/{queue_name}/{tier}/{division}?page={page}"
-        return await self._make_request(url, "league")
+        path = f"/lol/league/v4/entries/{queue_name}/{tier}/{division}?page={page}"
+        data = await self._request_platform_with_fallback(region, path, "league")
+        return data  # type: ignore[return-value]
     
     async def get_league_entries_by_summoner(
         self,
@@ -275,10 +297,9 @@ class RiotAPIClient:
         Returns:
             List of league entries or None
         """
-        base_url = self._get_platform_url(region)
-        url = f"{base_url}/lol/league/v4/entries/by-summoner/{summoner_id}"
-        
-        return await self._make_request(url, "league")
+        path = f"/lol/league/v4/entries/by-summoner/{summoner_id}"
+        data = await self._request_platform_with_fallback(region, path, "league")
+        return data  # type: ignore[return-value]
     
     async def get_league_entries_by_puuid(
         self,
@@ -295,10 +316,9 @@ class RiotAPIClient:
         Returns:
             List of league entries or None
         """
-        base_url = self._get_platform_url(region)
-        url = f"{base_url}/lol/league/v4/entries/by-puuid/{puuid}"
-        
-        return await self._make_request(url, "league")
+        path = f"/lol/league/v4/entries/by-puuid/{puuid}"
+        data = await self._request_platform_with_fallback(region, path, "league")
+        return data  # type: ignore[return-value]
     
     async def get_challenger_league(
         self,
@@ -315,10 +335,8 @@ class RiotAPIClient:
         Returns:
             Challenger league data or None
         """
-        base_url = self._get_platform_url(region)
-        url = f"{base_url}/lol/league/v4/challengerleagues/by-queue/{queue.api_queue_name}"
-        
-        return await self._make_request(url, "league")
+        path = f"/lol/league/v4/challengerleagues/by-queue/{queue.api_queue_name}"
+        return await self._request_platform_with_fallback(region, path, "league")
     
     async def get_grandmaster_league(
         self,
@@ -335,10 +353,8 @@ class RiotAPIClient:
         Returns:
             Grandmaster league data or None
         """
-        base_url = self._get_platform_url(region)
-        url = f"{base_url}/lol/league/v4/grandmasterleagues/by-queue/{queue.api_queue_name}"
-        
-        return await self._make_request(url, "league")
+        path = f"/lol/league/v4/grandmasterleagues/by-queue/{queue.api_queue_name}"
+        return await self._request_platform_with_fallback(region, path, "league")
     
     async def get_master_league(
         self,
@@ -355,19 +371,7 @@ class RiotAPIClient:
         Returns:
             Master league data or None
         """
-        base_url = self._get_platform_url(region)
-        url = f"{base_url}/lol/league/v4/masterleagues/by-queue/{queue.api_queue_name}"
-        
-        return await self._make_request(url, "league")
+        path = f"/lol/league/v4/masterleagues/by-queue/{queue.api_queue_name}"
+        return await self._request_platform_with_fallback(region, path, "league")
 
-    async def get_league_entries(
-        self,
-        region: Region,
-        queue: QueueType,
-        tier: str,
-        division: str,
-        page: int = 1
-    ) -> Optional[List[Dict[Any, Any]]]:
-        base_url = self._get_platform_url(region)
-        url = f"{base_url}/lol/league/v4/entries/{queue.api_queue_name}/{tier}/{division}?page={page}"
-        return await self._make_request(url, "league")
+    # Note: single implementation of get_league_entries is provided above with fallback.

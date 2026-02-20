@@ -1,12 +1,13 @@
 """Use case for scraping match data sequentially by region."""
 import logging
+import math
 import asyncio
 from typing import Dict, List
 
 from domain.entities import Match
 from domain.enums import Region, QueueType
 from infrastructure import RiotAPIClient, MatchRepository, SummonerRepository
-from application.services import DataScraperService
+from application.services.data_scraper import DataScraperService
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -32,7 +33,7 @@ class ScrapeMatchesUseCase:
             status_callback=status_callback
         )
         try:
-            from application.services import DataPersistenceService
+            from application.services.data_persistence_service import DataPersistenceService
             db_path = settings.DB_DIR / "scraper.sqlite"
             p = DataPersistenceService(db_path)
             existing_ids = p.get_existing_match_ids()
@@ -114,7 +115,7 @@ class ScrapeMatchesUseCase:
                 if remaining <= 0:
                     break
                 qn = max(1, len(queue_types) if queue_types else 1)
-                per_queue_chunk = max(1, min((remaining + qn - 1) // qn, 500))
+                per_queue_chunk = max(1, min(math.ceil(remaining / qn), settings.MAX_MATCHES_PER_CHUNK))
                 tasks = []
                 for queue_type in queue_types:
                     tasks.append(local_services[queue_type].scrape_matches_by_date_window(
@@ -132,7 +133,11 @@ class ScrapeMatchesUseCase:
                             region_results.setdefault(queue_type.queue_name, [])
                         else:
                             region_results.setdefault(queue_type.queue_name, [])
-                            take = max(0, (matches_per_region or 0) - region_total)
+                            take = min(
+                                len(res),
+                                per_queue_chunk,
+                                max(0, (matches_per_region or 0) - region_total),
+                            )
                             if take > 0:
                                 sliced = res[:take]
                                 region_results[queue_type.queue_name].extend(sliced)
@@ -147,7 +152,7 @@ class ScrapeMatchesUseCase:
                     if no_progress_loops >= 2:
                         try:
                             for qt in queue_types:
-                                extra = await local_services[qt]._discover_seed_puuids_neutral(region, qt, count=50)
+                                extra = await local_services[qt].seed_service.discover_seed_puuids(region, qt, count=50)
                                 for pu in extra:
                                     if pu not in local_services[qt].scraped_puuids:
                                         local_services[qt].scraped_puuids.add(pu)

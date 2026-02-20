@@ -5,6 +5,7 @@ from typing import List, Dict, Any
 import httpx
 from domain.entities import Match
 from domain.enums import Role
+from domain.enums.region import Region
 
 class DataPersistenceService:
     """Lightweight persistence layer for SQLite + CSV exports.
@@ -28,7 +29,10 @@ class DataPersistenceService:
         # Create core tables and add evolving columns safely
         cur = self._conn.cursor()
         cur.execute(
-            "CREATE TABLE IF NOT EXISTS matches (match_id TEXT PRIMARY KEY, region TEXT, platform_id TEXT, queue_id INTEGER, queue_type TEXT, game_version TEXT, patch_version TEXT, game_creation INTEGER, game_start_timestamp INTEGER, game_end_timestamp INTEGER, game_duration INTEGER, match_date TEXT, match_date_simple TEXT, duration_mmss TEXT)"
+            "CREATE TABLE IF NOT EXISTS matches (match_id TEXT PRIMARY KEY, region TEXT, platform_id TEXT, region_group TEXT, queue_id INTEGER, queue_type TEXT, game_version TEXT, patch_version TEXT, game_creation INTEGER, game_start_timestamp INTEGER, game_end_timestamp INTEGER, game_duration INTEGER, match_date TEXT, match_date_simple TEXT, duration_mmss TEXT)"
+        )
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS platforms (platform_id TEXT PRIMARY KEY, friendly_name TEXT, region_group TEXT)"
         )
         cur.execute(
             "CREATE TABLE IF NOT EXISTS teams (match_id TEXT, team_id INTEGER, win INTEGER, dragon_kills INTEGER, baron_kills INTEGER, tower_kills INTEGER, inhibitor_kills INTEGER, champion_kills INTEGER, atakhan_kills INTEGER, horde_kills INTEGER, total_gold INTEGER, total_experience INTEGER, PRIMARY KEY(match_id, team_id), FOREIGN KEY(match_id) REFERENCES matches(match_id))"
@@ -53,6 +57,8 @@ class DataPersistenceService:
                 cur.execute("ALTER TABLE matches ADD COLUMN match_date_simple TEXT")
             if "duration_mmss" not in cols:
                 cur.execute("ALTER TABLE matches ADD COLUMN duration_mmss TEXT")
+            if "region_group" not in cols:
+                cur.execute("ALTER TABLE matches ADD COLUMN region_group TEXT")
             pcols = {c[1] for c in cur.execute("PRAGMA table_info(participants)").fetchall()}
             add_cols = [
                 ("summoner1_id", "INTEGER"),
@@ -85,6 +91,65 @@ class DataPersistenceService:
                     pass
             self._conn.commit()
         except:
+            pass
+        # Seed platform mappings (idempotent)
+        self._seed_platforms()
+        # Ensure matches column order places region_group after platform_id
+        self._ensure_matches_column_order()
+
+    def _seed_platforms(self) -> None:
+        cur = self._conn.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS platforms (platform_id TEXT PRIMARY KEY, friendly_name TEXT, region_group TEXT)")
+        existing = {r[0] for r in cur.execute("SELECT platform_id FROM platforms").fetchall()}
+        rows = []
+        for r in Region.all_regions():
+            pid = r.platform_route
+            if pid not in existing:
+                rows.append((pid, r.friendly, r.regional_route))
+        if rows:
+            cur.executemany("INSERT OR IGNORE INTO platforms(platform_id, friendly_name, region_group) VALUES(?, ?, ?)", rows)
+            self._conn.commit()
+
+    def _ensure_matches_column_order(self) -> None:
+        try:
+            cur = self._conn.cursor()
+            info = cur.execute("PRAGMA table_info(matches)").fetchall()
+            cols = [c[1] for c in info]
+            desired = [
+                "match_id",
+                "region",
+                "platform_id",
+                "region_group",
+                "queue_id",
+                "queue_type",
+                "game_version",
+                "patch_version",
+                "game_creation",
+                "game_start_timestamp",
+                "game_end_timestamp",
+                "game_duration",
+                "match_date",
+                "match_date_simple",
+                "duration_mmss",
+            ]
+            if cols == desired:
+                return
+            cur.execute("ALTER TABLE matches RENAME TO matches_old")
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS matches (match_id TEXT PRIMARY KEY, region TEXT, platform_id TEXT, region_group TEXT, queue_id INTEGER, queue_type TEXT, game_version TEXT, patch_version TEXT, game_creation INTEGER, game_start_timestamp INTEGER, game_end_timestamp INTEGER, game_duration INTEGER, match_date TEXT, match_date_simple TEXT, duration_mmss TEXT)"
+            )
+            # Build select mapping from old to new
+            old_cols = {c: True for c in cols}
+            select_exprs = []
+            for name in desired:
+                if name in old_cols:
+                    select_exprs.append(name)
+                else:
+                    select_exprs.append("NULL")
+            cur.execute(f"INSERT INTO matches ({', '.join(desired)}) SELECT {', '.join(select_exprs)} FROM matches_old")
+            cur.execute("DROP TABLE matches_old")
+            self._conn.commit()
+        except Exception:
             pass
 
     # Removed destructive reset to preserve accumulated data
@@ -124,6 +189,7 @@ class DataPersistenceService:
                     m.match_id,
                     m.region.value,
                     m.platform_id,
+                    m.region.regional_route if hasattr(m.region, "regional_route") else None,
                     m.queue_id,
                     m.queue_type.queue_name,
                     m.game_version,
@@ -195,7 +261,7 @@ class DataPersistenceService:
                         spell_rows[spell_id] = spell_names.get(spell_id, None)
                         part_spell_rows.append((m.match_id, p.participant_id, slot, spell_id))
         cur.executemany(
-            "INSERT OR REPLACE INTO matches(match_id, region, platform_id, queue_id, queue_type, game_version, patch_version, game_creation, game_start_timestamp, game_end_timestamp, game_duration, match_date, match_date_simple, duration_mmss) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO matches(match_id, region, platform_id, region_group, queue_id, queue_type, game_version, patch_version, game_creation, game_start_timestamp, game_end_timestamp, game_duration, match_date, match_date_simple, duration_mmss) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             match_rows,
         )
         cur.executemany(
@@ -328,6 +394,7 @@ class DataPersistenceService:
             "summoner_spells": "SELECT * FROM summoner_spells",
             "participant_items": "SELECT * FROM participant_items",
             "participant_summoner_spells": "SELECT * FROM participant_summoner_spells",
+            "platforms": "SELECT * FROM platforms",
         }
         for name, q in table_queries.items():
             p = output_dir / f"{name}.csv"

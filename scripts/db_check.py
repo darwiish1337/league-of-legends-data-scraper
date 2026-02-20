@@ -1,40 +1,36 @@
-import sqlite3
+from __future__ import annotations
+
 import os
-from pathlib import Path
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from core.logging.config import bootstrap_logging, shutdown_logging
+from config import settings
+from presentation.cli import DBCheckCommand
+import argparse
 
-def main():
-    db_path = Path(__file__).resolve().parents[1] / 'data' / 'db' / 'scraper.sqlite'
-    print('DB:', db_path)
-    if not db_path.exists():
-        print('DB file not found')
-        return
-    conn = sqlite3.connect(str(db_path))
-    cur = conn.cursor()
-    for table in ['matches', 'participants', 'teams']:
-        try:
-            cnt = cur.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0]
-            print(f'{table}:', cnt)
-        except Exception as e:
-            print(f'{table} error:', e)
-    try:
-        rows = cur.execute('SELECT match_id FROM matches LIMIT 5').fetchall()
-        print('sample match_ids:', [r[0] for r in rows])
-    except Exception as e:
-        print('sample match_ids error:', e)
-    try:
-        rows = cur.execute('SELECT patch_version, COUNT(*) FROM matches GROUP BY patch_version ORDER BY COUNT(*) DESC LIMIT 10').fetchall()
-        print('top patch_version counts:', rows)
-    except Exception as e:
-        print('patch_version counts error:', e)
-    try:
-        tp = os.environ.get('TARGET_PATCH', '26.01')
-        rows = cur.execute('SELECT COUNT(*) FROM matches WHERE patch_version = ?', (tp,)).fetchone()
-        print('target patch count:', tp, rows[0] if rows else 0)
-        rows = cur.execute('SELECT match_id FROM matches WHERE patch_version = ? ORDER BY game_creation DESC LIMIT 5', (tp,)).fetchall()
-        print('target patch sample ids:', [r[0] for r in rows])
-    except Exception as e:
-        print('target patch error:', e)
-    conn.close()
 
-if __name__ == '__main__':
-    main()
+def main() -> int:
+    bootstrap_logging(service="db", level=settings.LOG_LEVEL, log_dir=settings.LOG_DIR, log_file_name="db.jsonl")
+    try:
+        parser = argparse.ArgumentParser(description="Database health/inspection")
+        parser.add_argument("--list", action="store_true", help="List tables")
+        parser.add_argument("--count", action="store_true", help="Count rows per table")
+        parser.add_argument("--integrity", action="store_true", help="Run PRAGMA integrity_check")
+        args = parser.parse_args()
+        cmd = DBCheckCommand()
+        if args.list or args.count or args.integrity:
+            if args.list:
+                cmd._list_tables()
+            if args.count:
+                cmd._count_rows()
+            if args.integrity:
+                cmd._integrity()
+        else:
+            cmd.run()
+        return 0
+    finally:
+        shutdown_logging()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

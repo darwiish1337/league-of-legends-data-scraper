@@ -52,13 +52,14 @@ class Settings:
     RETRY_BACKOFF: float = 2.0
     
     # Concurrent requests
-    MAX_CONCURRENT_REQUESTS: int = 4
+    MAX_CONCURRENT_REQUESTS: int = int(os.getenv('MAX_CONCURRENT_REQUESTS', '8'))
     
     # Match scraping
     MATCHES_PER_SUMMONER: int = int(os.getenv('MATCHES_PER_SUMMONER', '100'))
     MATCHES_PER_REGION: int = 50
     MATCHES_TOTAL: Optional[int] = int(os.getenv('MATCHES_TOTAL', '0')) or None
     IDS_PER_PUUID: int = 10
+    MAX_MATCHES_PER_CHUNK: int = int(os.getenv('MAX_MATCHES_PER_CHUNK', '50'))
     
 
     # Scraping mode
@@ -66,6 +67,14 @@ class Settings:
     SCRAPE_DATE: Optional[str] = None
     SEED_PUUIDS: str = ''     # Optional comma-separated PUUIDs to bootstrap
     SEED_SUMMONERS: str = ''  # Optional comma-separated summoner names to bootstrap
+    RANDOM_SCRAPE: bool = os.getenv('RANDOM_SCRAPE', 'false').strip().lower() == 'true'
+    RANDOM_REGION_TARGET_MIN: int = int(os.getenv('RANDOM_REGION_TARGET_MIN', '25'))
+    RANDOM_REGION_TARGET_MAX: int = int(os.getenv('RANDOM_REGION_TARGET_MAX', '75'))
+    DISABLED_REGIONS: set[str] = set(
+        r.strip().lower()
+        for r in os.getenv('DISABLED_REGIONS', '').split(',')
+        if r.strip()
+    )
     
     # Logging
     LOG_LEVEL: str = 'INFO'  # Global log level for optional loggers

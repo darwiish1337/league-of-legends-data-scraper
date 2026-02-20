@@ -1,6 +1,9 @@
 """Presentation layer - User interfaces."""
-from .cli import ScraperCLI
+from .cli import ScrapingCommand, HealthCommand, DeleteDataCommand, DBCheckCommand
 
 __all__ = [
-    'ScraperCLI',
+    "ScrapingCommand",
+    "HealthCommand",
+    "DeleteDataCommand",
+    "DBCheckCommand",
 ]
