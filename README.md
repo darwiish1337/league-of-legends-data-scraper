@@ -29,6 +29,7 @@
 - [⚙️ Configuration](#️-configuration)
 - [📊 Output Files](#-output-files)
 - [📋 Logging System](#-logging-system)
+- [🩺 Health Check](#-health-check)
 - [🗑️ Data Management](#️-data-management)
 - [🔧 Troubleshooting](#-troubleshooting)
 
@@ -45,6 +46,7 @@
 | 🗄️ **Durable Storage** | SQLite database + automatic CSV export per table |
 | ⚡ **Async Fetching** | Configurable concurrency with per-endpoint rate limiting |
 | 📋 **Enterprise Logging** | Colored console + structured JSON logs with context binding |
+| 🩺 **Health System** | DNS + HTTP checks with Adaptive Retry and Circuit Breaker |
 | 🗑️ **Data Management** | Interactive CLI + programmatic table clearing |
 
 ---
@@ -64,15 +66,29 @@ riot_data_scraper/
 │   └── interfaces/                 # Abstract repository contracts
 │
 ├── 🏗️  infrastructure/             # External integrations
-│   ├── riot_client.py              # Async Riot API client
-│   └── repositories/              # SQLite repository implementations
+│   ├── api/riot_client.py          # Async Riot API client
+│   └── repositories/               # SQLite repository implementations
 │
 ├── 🔧 application/                 # Orchestration layer
-│   ├── services/                   # Scraping & persistence services
-│   └── use_cases/                  # Business use cases
+│   ├── services/
+│   │   ├── data_scraper/           # Core scraping logic
+│   │   ├── seed/                   # Seed discovery service
+│   │   ├── delete_data/            # Data deletion service
+│   │   ├── health/                 # DNS/HTTP checkers, retry policy, breaker, manager
+│   │   └── data_persistence_service.py
+│   └── use_cases/                  # Business use cases (e.g., scrape_matches.py)
 │
-├── 🖥️  presentation/               # User-facing interface
-│   └── scraper_cli.py              # ScraperCLI — console UI
+├── 🖥️  presentation/cli/           # Console UI commands
+│   ├── scraping_command.py         # Scraping command
+│   ├── health_command.py           # Health command
+│   ├── delete_data_command.py      # Delete data command
+│   └── db_check_command.py         # DB check command
+│
+├── 🧪 scripts/                     # Script entrypoints
+│   ├── scraping.py                 # Run scraper directly
+│   ├── health.py                   # Run health checks
+│   ├── delete_data.py              # Run deletion CLI
+│   └── db_check.py                 # Run DB check CLI
 │
 ├── 📋 core/logging/                # Enterprise logging system
 │   ├── config.py                   # Bootstrap & shutdown
@@ -81,9 +97,6 @@ riot_data_scraper/
 │   ├── context.py                  # Per-task context (contextvars)
 │   └── logger.py                   # StructuredLogger + @traceable
 │
-├── 🔨 services/                    # Utility services
-│   └── data_deleter.py             # DataDeleter (list / clear / clear_all)
-│
 ├── 💾 data/                        # All generated output (gitignored)
 │   ├── db/
 │   │   └── scraper.sqlite          # 🗄️ Main database
@@ -91,8 +104,7 @@ riot_data_scraper/
 │   └── logs/
 │       └── scraper.jsonl           # 📋 Structured JSON log stream
 │
-├── 🚀 main.py                      # Minimal entrypoint
-└── 🗑️  delete_data.py              # Interactive data deletion CLI
+└── 🚀 main.py                      # Minimal entrypoint with main menu
 ```
 
 ---
@@ -158,6 +170,7 @@ TARGET_PATCH="16.3" MATCHES_PER_REGION="2500" python -u main.py
 - 🎯 Startup banner with config summary
 - 📡 Per-region progress: `Server → Next Server` with a live progress bar
 - ✅ On completion: total matches collected, DB save notice, CSV export notice
+- ▶️ Choosing `4) Scraping` starts scraping all servers automatically (sequential loop)
 
 ---
 
@@ -178,6 +191,14 @@ TARGET_PATCH="16.3" MATCHES_PER_REGION="2500" python -u main.py
 | `SEED_SUMMONERS` | Optional | — | Comma-separated summoner names as seeds |
 | `LOG_LEVEL` | Optional | `INFO` | `TRACE` / `DEBUG` / `INFO` / `SUCCESS` / `WARNING` / `ERROR` / `CRITICAL` |
 | `DEBUG_TRACE` | Optional | `false` | Set `true` to enable `@traceable` function timing |
+| `REGIONS` | Optional | — | Limit run to specific servers, e.g., `euw1,na1` |
+| `DISABLED_REGIONS` | Optional | — | Comma-separated servers to skip |
+| `RANDOM_SCRAPE` | Optional | `false` | Randomize per-region targets |
+| `RANDOM_REGION_TARGET_MIN` | Optional | `25` | Minimum when `RANDOM_SCRAPE=true` |
+| `RANDOM_REGION_TARGET_MAX` | Optional | `75` | Maximum when `RANDOM_SCRAPE=true` |
+| `MAX_MATCHES_PER_CHUNK` | Optional | `50` | Per-iteration chunk size for smoother progress |
+| `LOG_CONSOLE` | Optional | `false` | Enable console logging in addition to JSON files |
+| `LOG_CONSOLE_LEVEL` | Optional | — | Console verbosity when enabled, e.g., `WARNING` or `ERROR` |
 
 ---
 
@@ -195,7 +216,8 @@ data/
     ├── participant_summoner_spells.csv ← summoner spell choices
     ├── champions.csv                   ← champion reference table
     ├── items.csv                       ← item reference table
-    └── summoner_spells.csv             ← spell reference table
+    ├── summoner_spells.csv             ← spell reference table
+    └── platforms.csv                   ← platform reference table
 ```
 
 ---
@@ -243,6 +265,25 @@ def compute(a: int, b: int) -> int:
 
 ---
 
+## 🩺 Health Check
+
+Check DNS and HTTP status for platform hosts with Adaptive Retry and Circuit Breaker.
+
+```powershell
+python -u .\scripts\health.py
+```
+
+- 1) Check specific platforms (supports `all` and `sea`)
+- 2) Toggle JSON output
+- 3) Toggle Fail-Fast (stop on first failure)
+- 4) Settings: cache TTL, default status path, circuit breaker threshold & reset
+
+Env tuning:
+- `HEALTH_CACHE_TTL_S` — cache window (seconds)
+- `HEALTH_PATH` — status path (default `/lol/status/v4/platform-data`)
+- `HEALTH_RETRY_*` — attempts, backoff ms, factor, jitter
+- To see logs in console: set `LOG_CONSOLE=true`. To show only warnings/errors: add `LOG_CONSOLE_LEVEL=WARNING` (or `ERROR`).
+
 ## 🗑️ Data Management
 
 **Interactive CLI** — choose tables, confirm deletion:
@@ -257,7 +298,7 @@ Prompts you to choose: delete all tables, or pick specific ones from a numbered 
 
 ```python
 import sqlite3
-from services.data_deleter import DataDeleter
+from application.services.delete_data import DataDeleter
 
 deleter = DataDeleter(lambda: sqlite3.connect("data/db/scraper.sqlite"))
 

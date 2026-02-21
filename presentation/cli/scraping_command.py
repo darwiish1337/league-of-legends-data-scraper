@@ -45,7 +45,7 @@ class ScrapingCommand:
     def _make_progress_cb(self, region_target: int, label: str):
         width = 30
         def _progress(current: int, denom: int) -> None:
-            total = region_target
+            total = denom if isinstance(denom, int) and denom > 0 else region_target
             cur = max(0, int(current or 0))
             if total:
                 cur = min(cur, total)
@@ -85,7 +85,7 @@ class ScrapingCommand:
             all_map = {r.value: r for r in Region.all_regions()}
             regions = [all_map[c] for c in codes if c in all_map] or Region.all_regions()
         else:
-            regions = self._choose_regions_ui()
+            regions = Region.all_regions()
         queues = QueueType.ranked_queues()
 
         db_path = settings.DB_DIR / "scraper.sqlite"

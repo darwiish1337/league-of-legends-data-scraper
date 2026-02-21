@@ -31,10 +31,14 @@ def bootstrap_logging(
         lvl = to_level(level or os.getenv("LOG_LEVEL", "INFO"))
         root.setLevel(lvl)
 
-        console = logging.StreamHandler()
-        console.setLevel(lvl)
-        console.setFormatter(ConsoleFormatter())
-        root.addHandler(console)
+        enable_console = os.getenv("LOG_CONSOLE", "false").strip().lower() == "true"
+        console_level_str = os.getenv("LOG_CONSOLE_LEVEL", "")
+        if enable_console:
+            console = logging.StreamHandler()
+            console_level = to_level(console_level_str) if console_level_str else lvl
+            console.setLevel(console_level)
+            console.setFormatter(ConsoleFormatter())
+            root.addHandler(console)
 
         if log_dir:
             log_dir.mkdir(parents=True, exist_ok=True)
@@ -64,4 +68,3 @@ def shutdown_logging() -> None:
             _listener = None
     except Exception:
         pass
-
