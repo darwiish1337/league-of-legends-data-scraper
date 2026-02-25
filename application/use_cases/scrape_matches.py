@@ -151,12 +151,37 @@ class ScrapeMatchesUseCase:
                         no_progress_loops = 0
                     if no_progress_loops >= 2:
                         try:
+                            added = 0
                             for qt in queue_types:
                                 extra = await local_services[qt].seed_service.discover_seed_puuids(region, qt, count=50)
                                 for pu in extra:
                                     if pu not in local_services[qt].scraped_puuids:
                                         local_services[qt].scraped_puuids.add(pu)
-                            no_progress_loops = 0
+                                        added += 1
+                            if added == 0:
+                                try:
+                                    from application.services.data_persistence_service import DataPersistenceService
+                                    db_path = settings.DB_DIR / "scraper.sqlite"
+                                    dp = DataPersistenceService(db_path)
+                                    pool = dp.get_existing_puuids()
+                                    pulled = 0
+                                    for pu in pool:
+                                        if pu not in local_services[QueueType.RANKED_SOLO_5x5].scraped_puuids:
+                                            local_services[QueueType.RANKED_SOLO_5x5].scraped_puuids.add(pu)
+                                            pulled += 1
+                                        if pu not in local_services[QueueType.RANKED_FLEX_SR].scraped_puuids:
+                                            local_services[QueueType.RANKED_FLEX_SR].scraped_puuids.add(pu)
+                                            pulled += 1
+                                        if pulled >= 100:
+                                            break
+                                    if pulled > 0:
+                                        added = pulled
+                                except Exception:
+                                    pass
+                            if added > 0:
+                                no_progress_loops = 0
+                            else:
+                                break
                         except Exception:
                             break
                 except Exception as e:

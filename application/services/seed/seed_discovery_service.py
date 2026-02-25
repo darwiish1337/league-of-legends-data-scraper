@@ -22,30 +22,65 @@ class SeedDiscoveryService:
         tiers = ["IRON", "BRONZE", "SILVER", "GOLD", "PLATINUM", "EMERALD", "DIAMOND"]
         divisions = ["I", "II", "III", "IV"]
         summoner_ids: List[str] = []
+        summoner_names: List[str] = []
         try:
-            for t in tiers:
-                for d in divisions:
-                    entries = await self.api_client.get_league_entries(region, queue_type, t, d, page=1)
-                    if not entries:
+            try:
+                top = []
+                ch = await self.api_client.get_challenger_league(region, queue_type)
+                gm = await self.api_client.get_grandmaster_league(region, queue_type)
+                ms = await self.api_client.get_master_league(region, queue_type)
+                for blob in [ch, gm, ms]:
+                    if not blob:
                         continue
-                    for e in entries:
+                    for e in blob.get("entries", [])[:count]:
+                        sname = e.get("summonerName")
                         sid = e.get("summonerId")
+                        if sname:
+                            summoner_names.append(sname)
                         if sid:
                             summoner_ids.append(sid)
+                        if len(summoner_names) >= count:
+                            break
+                    if len(summoner_names) >= count:
+                        break
+            except Exception:
+                pass
+            if len(summoner_names) < count:
+                for t in tiers:
+                    for d in divisions:
+                        entries = await self.api_client.get_league_entries(region, queue_type, t, d, page=1)
+                        if not entries:
+                            continue
+                        for e in entries:
+                            sid = e.get("summonerId")
+                            sname = e.get("summonerName")
+                            if sid:
+                                summoner_ids.append(sid)
+                            if sname:
+                                summoner_names.append(sname)
                             if len(summoner_ids) >= count:
                                 break
+                        if len(summoner_ids) >= count:
+                            break
                     if len(summoner_ids) >= count:
                         break
-                if len(summoner_ids) >= count:
-                    break
-            tasks = [self.summoner_repo.get_summoner_by_id(region, sid) for sid in summoner_ids[:count]]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
             puuids: List[str] = []
-            for r in results:
-                if isinstance(r, Exception) or r is None:
-                    continue
-                puuids.append(r.puuid)
-            # unique preserve order
+            if summoner_names:
+                name_tasks = [self.summoner_repo.get_summoner_by_name(region, n) for n in summoner_names[:count]]
+                name_results = await asyncio.gather(*name_tasks, return_exceptions=True)
+                for r in name_results:
+                    if isinstance(r, Exception) or r is None:
+                        continue
+                    puuids.append(r.puuid)
+            if not puuids and summoner_ids:
+                id_tasks = [self.summoner_repo.get_summoner_by_id(region, sid) for sid in summoner_ids[:count]]
+                id_results = await asyncio.gather(*id_tasks, return_exceptions=True)
+                for r in id_results:
+                    if isinstance(r, Exception) or r is None:
+                        continue
+                    puuids.append(r.puuid)
+            
             seen = set()
             ordered = []
             for p in puuids:
@@ -55,4 +90,3 @@ class SeedDiscoveryService:
             return ordered[:count]
         except Exception:
             return []
-

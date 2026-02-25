@@ -7,9 +7,10 @@ import random
 import socket
 from config import settings
 from domain.enums import Region, QueueType
-from infrastructure import RiotAPIClient
+from infrastructure import RiotAPIClient, SummonerRepository
 from application.use_cases import ScrapeMatchesUseCase
 from application.services.data_persistence_service import DataPersistenceService
+from application.services.seed import SeedDiscoveryService
 from core.logging.logger import get_logger
 
 
@@ -142,12 +143,32 @@ class ScrapingCommand:
                 else:
                     self._log.info(f"platform-ok {region.value}")
 
+                seed_map = None
+                try:
+                    seed_service = SeedDiscoveryService(api, SummonerRepository(api))
+                    unique_seeds = []
+                    try:
+                        db_seeds = p.get_existing_puuids()
+                        for s in db_seeds[:50]:
+                            if s and s not in unique_seeds:
+                                unique_seeds.append(s)
+                    except Exception:
+                        pass
+                    for q in queues:
+                        extra = await seed_service.discover_seed_puuids(region, q, count=50)
+                        for p in extra:
+                            if p and p not in unique_seeds:
+                                unique_seeds.append(p)
+                    if unique_seeds:
+                        seed_map = {region: unique_seeds}
+                except Exception:
+                    seed_map = None
                 results = await use_case.execute(
                     regions=[region],
                     queue_types=queues,
                     matches_per_region=region_target,
                     matches_total=None,
-                    seed_puuids_by_region=None
+                    seed_puuids_by_region=seed_map
                 )
 
                 region_matches = []

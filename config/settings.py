@@ -25,9 +25,9 @@ class Settings:
     
     # Rate Limiting (per 10 seconds / per 10 minutes)
     RATE_LIMIT_PER_10_SEC: int = 20
-    RATE_LIMIT_PER_10_MIN: int = 100
-    MATCH_RATE_LIMIT_PER_10_SEC: int = 6
-    MATCH_RATE_LIMIT_PER_10_MIN: int = 60
+    RATE_LIMIT_PER_10_MIN: int = 200
+    MATCH_RATE_LIMIT_PER_10_SEC: int = 12
+    MATCH_RATE_LIMIT_PER_10_MIN: int = 120
     SUMMONER_RATE_LIMIT_PER_10_SEC: int = 20
     SUMMONER_RATE_LIMIT_PER_10_MIN: int = 100
     LEAGUE_RATE_LIMIT_PER_10_SEC: int = 10
@@ -52,13 +52,13 @@ class Settings:
     RETRY_BACKOFF: float = 2.0
     
     # Concurrent requests
-    MAX_CONCURRENT_REQUESTS: int = int(os.getenv('MAX_CONCURRENT_REQUESTS', '8'))
+    MAX_CONCURRENT_REQUESTS: int = int(os.getenv('MAX_CONCURRENT_REQUESTS', '12'))
     
     # Match scraping
     MATCHES_PER_SUMMONER: int = int(os.getenv('MATCHES_PER_SUMMONER', '100'))
-    MATCHES_PER_REGION: int = 50
+    MATCHES_PER_REGION: int = 10
     MATCHES_TOTAL: Optional[int] = int(os.getenv('MATCHES_TOTAL', '0')) or None
-    IDS_PER_PUUID: int = 10
+    IDS_PER_PUUID: int = 20
     MAX_MATCHES_PER_CHUNK: int = int(os.getenv('MAX_MATCHES_PER_CHUNK', '50'))
     
 

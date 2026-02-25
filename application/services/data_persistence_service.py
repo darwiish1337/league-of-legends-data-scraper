@@ -260,18 +260,175 @@ class DataPersistenceService:
                     if spell_id and spell_id > 0:
                         spell_rows[spell_id] = spell_names.get(spell_id, None)
                         part_spell_rows.append((m.match_id, p.participant_id, slot, spell_id))
+        # Write parent table first
         cur.executemany(
-            "INSERT OR REPLACE INTO matches(match_id, region, platform_id, region_group, queue_id, queue_type, game_version, patch_version, game_creation, game_start_timestamp, game_end_timestamp, game_duration, match_date, match_date_simple, duration_mmss) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            """
+            INSERT INTO matches(
+                match_id, region, platform_id, region_group, queue_id, queue_type,
+                game_version, patch_version, game_creation, game_start_timestamp,
+                game_end_timestamp, game_duration, match_date, match_date_simple, duration_mmss
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(match_id) DO UPDATE SET
+                region=excluded.region,
+                platform_id=excluded.platform_id,
+                region_group=excluded.region_group,
+                queue_id=excluded.queue_id,
+                queue_type=excluded.queue_type,
+                game_version=excluded.game_version,
+                patch_version=excluded.patch_version,
+                game_creation=excluded.game_creation,
+                game_start_timestamp=excluded.game_start_timestamp,
+                game_end_timestamp=excluded.game_end_timestamp,
+                game_duration=excluded.game_duration,
+                match_date=excluded.match_date,
+                match_date_simple=excluded.match_date_simple,
+                duration_mmss=excluded.duration_mmss
+            """,
             match_rows,
         )
-        cur.executemany(
-            "INSERT OR REPLACE INTO teams(match_id, team_id, win, dragon_kills, baron_kills, tower_kills, inhibitor_kills, champion_kills, atakhan_kills, horde_kills, total_gold, total_experience) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            team_rows,
-        )
-        cur.executemany(
-            "INSERT OR REPLACE INTO participants(match_id, participant_id, puuid, summoner_name, summoner_id, team_id, champion_id, champion_name, individual_position, rank_tier, rank_division, summoner1_id, summoner2_id, summoner1_name, summoner2_name, item0, item1, item2, item3, item4, item5, item6, win, kills, deaths, assists, gold_earned, champion_experience, total_damage_dealt_to_champions) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            participant_rows,
-        )
+        # Persist parents first
+        self._conn.commit()
+        # Validate parents exist in DB
+        inserted_ids = {r[0] for r in match_rows}
+        existing_ids = set()
+        if inserted_ids:
+            placeholders = ",".join(["?"] * len(inserted_ids))
+            rows = cur.execute(f"SELECT match_id FROM matches WHERE match_id IN ({placeholders})", list(inserted_ids)).fetchall()
+            existing_ids = {row[0] for row in rows}
+        if existing_ids:
+            team_rows = [r for r in team_rows if r and r[0] in existing_ids]
+            participant_rows = [r for r in participant_rows if r and r[0] in existing_ids]
+            part_item_rows = [r for r in part_item_rows if r and r[0] in existing_ids]
+            part_spell_rows = [r for r in part_spell_rows if r and r[0] in existing_ids]
+        # Build participant key set for join tables
+        participant_keys = {(r[0], r[1]) for r in participant_rows}
+        if participant_keys:
+            part_item_rows = [r for r in part_item_rows if (r[0], r[1]) in participant_keys]
+            part_spell_rows = [r for r in part_spell_rows if (r[0], r[1]) in participant_keys]
+        # Write teams next (robust against orphaned child rows)
+        try:
+            cur.executemany(
+                """
+                INSERT INTO teams(
+                    match_id, team_id, win, dragon_kills, baron_kills, tower_kills,
+                    inhibitor_kills, champion_kills, atakhan_kills, horde_kills,
+                    total_gold, total_experience
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(match_id, team_id) DO UPDATE SET
+                    win=excluded.win,
+                    dragon_kills=excluded.dragon_kills,
+                    baron_kills=excluded.baron_kills,
+                    tower_kills=excluded.tower_kills,
+                    inhibitor_kills=excluded.inhibitor_kills,
+                    champion_kills=excluded.champion_kills,
+                    atakhan_kills=excluded.atakhan_kills,
+                    horde_kills=excluded.horde_kills,
+                    total_gold=excluded.total_gold,
+                    total_experience=excluded.total_experience
+                """,
+                team_rows,
+            )
+        except sqlite3.IntegrityError:
+            for r in team_rows:
+                try:
+                    cur.execute(
+                        """
+                        INSERT INTO teams(
+                            match_id, team_id, win, dragon_kills, baron_kills, tower_kills,
+                            inhibitor_kills, champion_kills, atakhan_kills, horde_kills,
+                            total_gold, total_experience
+                        )
+                        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(match_id, team_id) DO UPDATE SET
+                            win=excluded.win,
+                            dragon_kills=excluded.dragon_kills,
+                            baron_kills=excluded.baron_kills,
+                            tower_kills=excluded.tower_kills,
+                            inhibitor_kills=excluded.inhibitor_kills,
+                            champion_kills=excluded.champion_kills,
+                            atakhan_kills=excluded.atakhan_kills,
+                            horde_kills=excluded.horde_kills,
+                            total_gold=excluded.total_gold,
+                            total_experience=excluded.total_experience
+                        """,
+                        r,
+                    )
+                except sqlite3.IntegrityError:
+                    # Skip orphaned team row if parent match_id is missing due to upstream issues
+                    continue
+        # Write participants (fallback row-by-row on integrity error)
+        try:
+            cur.executemany(
+                """
+                INSERT INTO participants(
+                    match_id, participant_id, puuid, summoner_name, summoner_id, team_id,
+                    champion_id, champion_name, individual_position, rank_tier, rank_division,
+                    summoner1_id, summoner2_id, summoner1_name, summoner2_name,
+                    item0, item1, item2, item3, item4, item5, item6,
+                    win, kills, deaths, assists, gold_earned, champion_experience, total_damage_dealt_to_champions
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(match_id, participant_id) DO UPDATE SET
+                    puuid=excluded.puuid,
+                    summoner_name=excluded.summoner_name,
+                    summoner_id=excluded.summoner_id,
+                    team_id=excluded.team_id,
+                    champion_id=excluded.champion_id,
+                    champion_name=excluded.champion_name,
+                    individual_position=excluded.individual_position,
+                    rank_tier=excluded.rank_tier,
+                    rank_division=excluded.rank_division,
+                    summoner1_id=excluded.summoner1_id,
+                    summoner2_id=excluded.summoner2_id,
+                    summoner1_name=excluded.summoner1_name,
+                    summoner2_name=excluded.summoner2_name,
+                    item0=excluded.item0, item1=excluded.item1, item2=excluded.item2,
+                    item3=excluded.item3, item4=excluded.item4, item5=excluded.item5, item6=excluded.item6,
+                    win=excluded.win, kills=excluded.kills, deaths=excluded.deaths, assists=excluded.assists,
+                    gold_earned=excluded.gold_earned, champion_experience=excluded.champion_experience,
+                    total_damage_dealt_to_champions=excluded.total_damage_dealt_to_champions
+                """,
+                participant_rows,
+            )
+        except sqlite3.IntegrityError:
+            for r in participant_rows:
+                try:
+                    cur.execute(
+                        """
+                        INSERT INTO participants(
+                            match_id, participant_id, puuid, summoner_name, summoner_id, team_id,
+                            champion_id, champion_name, individual_position, rank_tier, rank_division,
+                            summoner1_id, summoner2_id, summoner1_name, summoner2_name,
+                            item0, item1, item2, item3, item4, item5, item6,
+                            win, kills, deaths, assists, gold_earned, champion_experience, total_damage_dealt_to_champions
+                        )
+                        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(match_id, participant_id) DO UPDATE SET
+                            puuid=excluded.puuid,
+                            summoner_name=excluded.summoner_name,
+                            summoner_id=excluded.summoner_id,
+                            team_id=excluded.team_id,
+                            champion_id=excluded.champion_id,
+                            champion_name=excluded.champion_name,
+                            individual_position=excluded.individual_position,
+                            rank_tier=excluded.rank_tier,
+                            rank_division=excluded.rank_division,
+                            summoner1_id=excluded.summoner1_id,
+                            summoner2_id=excluded.summoner2_id,
+                            summoner1_name=excluded.summoner1_name,
+                            summoner2_name=excluded.summoner2_name,
+                            item0=excluded.item0, item1=excluded.item1, item2=excluded.item2,
+                            item3=excluded.item3, item4=excluded.item4, item5=excluded.item5, item6=excluded.item6,
+                            win=excluded.win, kills=excluded.kills, deaths=excluded.deaths, assists=excluded.assists,
+                            gold_earned=excluded.gold_earned, champion_experience=excluded.champion_experience,
+                            total_damage_dealt_to_champions=excluded.total_damage_dealt_to_champions
+                        """,
+                        r,
+                    )
+                except sqlite3.IntegrityError:
+                    continue
         if champion_rows:
             cur.executemany(
                 "INSERT OR IGNORE INTO champions(champion_id, champion_name) VALUES(?, ?)",
@@ -287,16 +444,65 @@ class DataPersistenceService:
                 "INSERT OR IGNORE INTO summoner_spells(spell_id, spell_name) VALUES(?, ?)",
                 [(sid, sname) for sid, sname in spell_rows.items() if sname],
             )
+        if existing_ids:
+            placeholders = ",".join(["?"] * len(existing_ids))
+            rows = cur.execute(
+                f"SELECT match_id, participant_id FROM participants WHERE match_id IN ({placeholders})",
+                list(existing_ids),
+            ).fetchall()
+            db_participant_keys = {(row[0], row[1]) for row in rows}
+            part_item_rows = [r for r in part_item_rows if (r[0], r[1]) in db_participant_keys]
+            part_spell_rows = [r for r in part_spell_rows if (r[0], r[1]) in db_participant_keys]
         if part_item_rows:
-            cur.executemany(
-                "INSERT OR REPLACE INTO participant_items(match_id, participant_id, slot, item_id) VALUES(?, ?, ?, ?)",
-                part_item_rows,
-            )
+            try:
+                cur.executemany(
+                    """
+                    INSERT INTO participant_items(match_id, participant_id, slot, item_id)
+                    VALUES(?, ?, ?, ?)
+                    ON CONFLICT(match_id, participant_id, slot) DO UPDATE SET
+                        item_id=excluded.item_id
+                    """,
+                    part_item_rows,
+                )
+            except sqlite3.IntegrityError:
+                for r in part_item_rows:
+                    try:
+                        cur.execute(
+                            """
+                            INSERT INTO participant_items(match_id, participant_id, slot, item_id)
+                            VALUES(?, ?, ?, ?)
+                            ON CONFLICT(match_id, participant_id, slot) DO UPDATE SET
+                                item_id=excluded.item_id
+                            """,
+                            r,
+                        )
+                    except sqlite3.IntegrityError:
+                        continue
         if part_spell_rows:
-            cur.executemany(
-                "INSERT OR REPLACE INTO participant_summoner_spells(match_id, participant_id, slot, spell_id) VALUES(?, ?, ?, ?)",
-                part_spell_rows,
-            )
+            try:
+                cur.executemany(
+                    """
+                    INSERT INTO participant_summoner_spells(match_id, participant_id, slot, spell_id)
+                    VALUES(?, ?, ?, ?)
+                    ON CONFLICT(match_id, participant_id, slot) DO UPDATE SET
+                        spell_id=excluded.spell_id
+                    """,
+                    part_spell_rows,
+                )
+            except sqlite3.IntegrityError:
+                for r in part_spell_rows:
+                    try:
+                        cur.execute(
+                            """
+                            INSERT INTO participant_summoner_spells(match_id, participant_id, slot, spell_id)
+                            VALUES(?, ?, ?, ?)
+                            ON CONFLICT(match_id, participant_id, slot) DO UPDATE SET
+                                spell_id=excluded.spell_id
+                            """,
+                            r,
+                        )
+                    except sqlite3.IntegrityError:
+                        continue
         self._conn.commit()
 
     def seed_static_data(self) -> None:
