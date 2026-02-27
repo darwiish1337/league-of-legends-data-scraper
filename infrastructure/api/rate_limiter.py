@@ -162,3 +162,9 @@ class EndpointRateLimiter:
         limiter = self.limiters.get(endpoint, self._default_limiter)
         if limiter:
             await limiter.acquire()
+    
+    async def reset_endpoint(self, endpoint: str = "default") -> None:
+        """Reset a specific endpoint limiter (clear tracked requests)."""
+        limiter = self.limiters.get(endpoint, self._default_limiter)
+        if limiter:
+            await limiter.reset()

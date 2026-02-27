@@ -93,7 +93,10 @@ class ScrapeMatchesUseCase:
             counts = {"solo": 0, "flex": 0}
             def mk_progress(label: str):
                 def _cb(c, _t):
-                    counts[label] = max(0, c or 0)
+                    # Ensure monotonic per-queue progress to avoid bar jumping backwards
+                    cur = max(0, int(c or 0))
+                    if cur > counts[label]:
+                        counts[label] = cur
                     if outer_progress_cb:
                         total = counts["solo"] + counts["flex"]
                         if matches_per_region is not None:

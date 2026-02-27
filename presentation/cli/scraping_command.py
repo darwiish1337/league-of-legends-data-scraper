@@ -22,13 +22,14 @@ class ScrapingCommand:
         self._log = get_logger(__name__, service="scrape-cli")
 
     def _print_banner(self) -> None:
-        print("""
-╔═════════════════════════════════════════╗
-║                                         ║
-║    RIOT GAMES LOL RANKED GAMES DATA SCRAPER - PATCH {patch}
-║                                         ║
-╚═════════════════════════════════════════╝
-        """.format(patch=settings.TARGET_PATCH))
+        # Use ASCII-only banner so it works on Windows consoles that
+        # may not support box-drawing characters or UTF-8 by default.
+        print(
+            "\n"
+            "============================================================\n"
+            "  RIOT GAMES LOL RANKED GAMES DATA SCRAPER - PATCH {patch}\n"
+            "============================================================\n"
+        .format(patch=settings.TARGET_PATCH))
 
     def _print_summary(self, regions: List[Region], queues: List[QueueType]) -> None:
         print("\n" + "="*57)
@@ -44,20 +45,28 @@ class ScrapingCommand:
         print("\nStarting data collection...\n")
 
     def _make_progress_cb(self, region_target: int, label: str):
-        width = 30
+        import time
+        import shutil
+        start_ts = time.time()
         def _progress(current: int, denom: int) -> None:
-            total = denom if isinstance(denom, int) and denom > 0 else region_target
+            try:
+                cols = shutil.get_terminal_size(fallback=(80, 20)).columns
+            except Exception:
+                cols = 80
+            total = region_target
             cur = max(0, int(current or 0))
-            if total:
-                cur = min(cur, total)
-                filled = int(width * (cur / total))
-            else:
-                filled = 0
-            bar = "█" * filled + "-" * (width - filled)
-            if total:
-                print(f"\r{label} | {bar} | {cur}/{total}", end="", flush=True)
-            else:
-                print(f"\r{label} | {bar} | {cur}", end="", flush=True)
+            if cur > total:
+                total = cur
+            pct = (cur / total) if total else 0.0
+            elapsed = max(0.0, time.time() - start_ts)
+            eta_secs = int(elapsed * (1.0 - pct) / pct) if pct > 0 else 0
+            mm = eta_secs // 60
+            ss = eta_secs % 60
+            info = f"{cur:,}/{total:,} {int(pct*100)}% ETA {mm:02d}:{ss:02d}"
+            bar_space = max(10, min(60, cols - len(label) - 3 - len(info) - 3))
+            filled = int(bar_space * pct) if bar_space > 0 else 0
+            bar = ("█" * filled + "-" * (bar_space - filled)) if bar_space > 0 else ""
+            print(f"\r{label} | {bar} | {info}", end="", flush=True)
         return _progress
 
     @staticmethod
@@ -119,6 +128,7 @@ class ScrapingCommand:
                 self._log.info(f"region-start {region.value}")
                 if idx + 1 < len(regions):
                     print(f"Next Server: {regions[idx + 1].friendly}", flush=True)
+                print(f"Target: {region_target:,}", flush=True)
 
                 progress_cb = self._make_progress_cb(region_target, region.value)
                 use_case = ScrapeMatchesUseCase(api, progress_callback=progress_cb, status_callback=lambda _: None)

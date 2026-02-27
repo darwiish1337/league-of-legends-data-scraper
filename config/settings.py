@@ -24,14 +24,17 @@ class Settings:
     RIOT_API_KEY: str = os.getenv('RIOT_API_KEY', '')
     
     # Rate Limiting (per 10 seconds / per 10 minutes)
-    RATE_LIMIT_PER_10_SEC: int = 20
-    RATE_LIMIT_PER_10_MIN: int = 200
-    MATCH_RATE_LIMIT_PER_10_SEC: int = 12
-    MATCH_RATE_LIMIT_PER_10_MIN: int = 120
-    SUMMONER_RATE_LIMIT_PER_10_SEC: int = 20
-    SUMMONER_RATE_LIMIT_PER_10_MIN: int = 100
-    LEAGUE_RATE_LIMIT_PER_10_SEC: int = 10
-    LEAGUE_RATE_LIMIT_PER_10_MIN: int = 100
+    # These defaults are set slightly *below* the documented Riot limits
+    # to avoid repeated 429 responses with long Retry-After pauses, which
+    # slows scraping more than running a bit under the hard cap.
+    RATE_LIMIT_PER_10_SEC: int = 10
+    RATE_LIMIT_PER_10_MIN: int = 100
+    MATCH_RATE_LIMIT_PER_10_SEC: int = 10
+    MATCH_RATE_LIMIT_PER_10_MIN: int = 100
+    SUMMONER_RATE_LIMIT_PER_10_SEC: int = 10
+    SUMMONER_RATE_LIMIT_PER_10_MIN: int = 80
+    LEAGUE_RATE_LIMIT_PER_10_SEC: int = 8
+    LEAGUE_RATE_LIMIT_PER_10_MIN: int = 80
     
     # Patch Configuration
     TARGET_PATCH: str = os.getenv('TARGET_PATCH', '16.3')
@@ -52,13 +55,16 @@ class Settings:
     RETRY_BACKOFF: float = 2.0
     
     # Concurrent requests
-    MAX_CONCURRENT_REQUESTS: int = int(os.getenv('MAX_CONCURRENT_REQUESTS', '12'))
+    # This bound controls how many match-detail requests are in flight at once.
+    # A slightly lower default keeps us under rate limits more reliably and
+    # avoids 50–60s global stalls after 429 responses.
+    MAX_CONCURRENT_REQUESTS: int = int(os.getenv('MAX_CONCURRENT_REQUESTS', '8'))
     
     # Match scraping
     MATCHES_PER_SUMMONER: int = int(os.getenv('MATCHES_PER_SUMMONER', '100'))
-    MATCHES_PER_REGION: int = 10
+    MATCHES_PER_REGION: int = 3020
     MATCHES_TOTAL: Optional[int] = int(os.getenv('MATCHES_TOTAL', '0')) or None
-    IDS_PER_PUUID: int = 20
+    IDS_PER_PUUID: int = 40
     MAX_MATCHES_PER_CHUNK: int = int(os.getenv('MAX_MATCHES_PER_CHUNK', '50'))
     
 

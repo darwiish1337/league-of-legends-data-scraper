@@ -35,6 +35,8 @@ class RiotAPIClient:
         
         # Add specific endpoint rate limiters based on documentation
         self._setup_endpoint_limiters()
+        # Adaptive cooldown per endpoint after 429 retry-after responses
+        self._endpoint_cooldown: dict[str, float] = {}
     
     def _setup_endpoint_limiters(self) -> None:
         """Setup rate limiters for specific endpoints."""
@@ -120,6 +122,15 @@ class RiotAPIClient:
         
         for attempt in range(max_retries + 1):
             try:
+                # Honor adaptive cooldown for this endpoint
+                try:
+                    import time as _time
+                    cd_until = self._endpoint_cooldown.get(endpoint_type, 0.0)
+                    now = _time.time()
+                    if cd_until > now:
+                        await asyncio.sleep(cd_until - now)
+                except Exception:
+                    pass
                 # Acquire rate limit permission
                 await self.rate_limiter.acquire(endpoint_type)
                 
@@ -131,6 +142,14 @@ class RiotAPIClient:
                 if response.status_code == 429:
                     retry_after = int(response.headers.get('Retry-After', '1'))
                     logger.warning(f"Rate limited. Retrying after {retry_after}s. URL: {url}")
+                    # Set endpoint-wide cooldown to prevent parallel 429 storms
+                    try:
+                        import time as _time
+                        self._endpoint_cooldown[endpoint_type] = _time.time() + retry_after
+                        # Reset endpoint limiter so future scheduling starts fresh
+                        await self.rate_limiter.reset_endpoint(endpoint_type)
+                    except Exception:
+                        pass
                     await asyncio.sleep(retry_after)
                     continue
                 if response.status_code == 404:
