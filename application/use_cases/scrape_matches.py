@@ -1,8 +1,9 @@
-"""Use case for scraping match data sequentially by region."""
-import logging
-import math
+"""Use case for scraping match data - one continuous run per queue."""
+from __future__ import annotations
+
 import asyncio
-from typing import Dict, List
+import logging
+from typing import Dict, List, Optional
 
 from domain.entities import Match
 from domain.enums import Region, QueueType
@@ -14,190 +15,120 @@ logger = logging.getLogger(__name__)
 
 
 class ScrapeMatchesUseCase:
-    """Coordinates match scraping: sequential by region, concurrent per queue."""
-    
-    def __init__(self, api_client: RiotAPIClient, progress_callback=None, status_callback=None):
-        """
-        Initialize use case.
-        
-        Args:
-            api_client: Riot API client instance
-        """
-        self.api_client = api_client
-        self.match_repo = MatchRepository(api_client)
+    """
+    Runs each queue as a single continuous scrape until the region target
+    is met.  No chunking — the DataScraperService loop handles everything
+    internally and keeps discovering new PUUIDs automatically.
+    """
+
+    def __init__(
+        self,
+        api_client: RiotAPIClient,
+        progress_callback=None,
+        status_callback=None,
+    ):
+        self.api_client    = api_client
+        self.match_repo    = MatchRepository(api_client)
         self.summoner_repo = SummonerRepository(api_client)
-        self.scraper_service = DataScraperService(
-            self.match_repo,
-            self.summoner_repo,
-            progress_callback=progress_callback,
-            status_callback=status_callback
-        )
+        self._progress_cb  = progress_callback
+        self._status_cb    = status_callback
+
+        # Shared sets — pre-loaded from DB so we never re-fetch old data
+        self._scraped_match_ids: set = set()
+        self._scraped_puuids:    set = set()
         try:
             from application.services.data_persistence_service import DataPersistenceService
             db_path = settings.DB_DIR / "scraper.sqlite"
             p = DataPersistenceService(db_path)
-            existing_ids = p.get_existing_match_ids()
-            existing_puuids = p.get_existing_puuids()
-            self.scraper_service.scraped_match_ids.update(existing_ids)
-            self.scraper_service.scraped_puuids.update(existing_puuids)
+            self._scraped_match_ids.update(p.get_existing_match_ids())
+            self._scraped_puuids.update(p.get_existing_puuids())
         except Exception:
             pass
-    
+
+    # ------------------------------------------------------------------ #
+
     async def execute(
         self,
         regions: List[Region] = None,
         queue_types: List[QueueType] = None,
         matches_per_region: int = 500,
         matches_total: int = None,
-        seed_puuids_by_region: Dict[Region, List[str]] = None
+        seed_puuids_by_region: Dict[Region, List[str]] = None,
     ) -> Dict[str, Dict[str, List[Match]]]:
-        """
-        Execute the scraping process.
-        
-        Args:
-            regions: List of regions to scrape (defaults to all)
-            queue_types: List of queue types to scrape (defaults to both ranked)
-            matches_per_region: Number of matches to scrape per region
-            
-        Returns:
-            Dictionary mapping region -> queue_type -> matches
-        """
-        # Default to all regions if not specified
+
         if regions is None:
             regions = Region.all_regions()
-        
-        # Default to both ranked queues if not specified
         if queue_types is None:
             queue_types = QueueType.ranked_queues()
-        
-        logger.info(
-            f"Starting scrape for {len(regions)} regions, "
-            f"{len(queue_types)} queue types"
-        )
-        
-        results = {}
+
+        results: Dict[str, Dict[str, List[Match]]] = {}
         total_collected = 0
-        
-        for idx, region in enumerate(regions):
-            region_results = {}
-            next_region = regions[idx + 1] if idx + 1 < len(regions) else None
-            # Announce region once, not per-queue
-            if self.scraper_service.status_callback:
-                self.scraper_service.status_callback(("server", region, next_region))
-            # Initialize region-level progress line
-            if self.scraper_service.progress_callback:
-                self.scraper_service.progress_callback(0, matches_per_region or 0)
-            # Run queues concurrently in chunks until region reaches target
-            outer_progress_cb = self.scraper_service.progress_callback
-            local_services = {}
-            counts = {"solo": 0, "flex": 0}
-            def mk_progress(label: str):
-                def _cb(c, _t):
-                    # Ensure monotonic per-queue progress to avoid bar jumping backwards
-                    cur = max(0, int(c or 0))
-                    if cur > counts[label]:
-                        counts[label] = cur
-                    if outer_progress_cb:
-                        total = counts["solo"] + counts["flex"]
-                        if matches_per_region is not None:
-                            total = min(total, matches_per_region)
-                        outer_progress_cb(total, matches_per_region or 0)
+        n_queues = max(1, len(queue_types))
+
+        for region in regions:
+            region_results: Dict[str, List[Match]] = {qt.queue_name: [] for qt in queue_types}
+
+            # Each queue scrapes half the target concurrently
+            per_queue_target = max(1, (matches_per_region + n_queues - 1) // n_queues)
+
+            # Totals across queues — used for the single shared progress bar
+            counts: Dict[str, int] = {qt.queue_name: 0 for qt in queue_types}
+
+            def _make_cb(qname: str):
+                def _cb(current: int, _total: int) -> None:
+                    cur = max(0, int(current or 0))
+                    if cur > counts[qname]:
+                        counts[qname] = cur
+                    if self._progress_cb:
+                        combined = min(sum(counts.values()), matches_per_region)
+                        self._progress_cb(combined, matches_per_region)
                 return _cb
-            for queue_type in queue_types:
-                label = "solo" if queue_type == QueueType.RANKED_SOLO_5x5 else "flex"
-                local_services[queue_type] = DataScraperService(
+
+            # Build one DataScraperService per queue; share global id/puuid pools
+            services: Dict[QueueType, DataScraperService] = {}
+            for qt in queue_types:
+                svc = DataScraperService(
                     self.match_repo,
                     self.summoner_repo,
-                    progress_callback=mk_progress(label),
-                    status_callback=self.scraper_service.status_callback
+                    progress_callback=_make_cb(qt.queue_name),
+                    status_callback=self._status_cb,
                 )
+                # Share the global dedup pools
+                svc.scraped_match_ids = self._scraped_match_ids
+                svc.scraped_puuids    = self._scraped_puuids
+                # Inject any external seeds
+                if seed_puuids_by_region:
+                    for p in seed_puuids_by_region.get(region, []):
+                        if p and p not in self._scraped_puuids:
+                            self._scraped_puuids.add(p)
+                services[qt] = svc
+
+            # Run all queues concurrently in a single gather — no outer loop
+            tasks = [
+                services[qt].scrape_matches_by_date_window(
+                    region=region,
+                    queue_type=qt,
+                    max_matches=per_queue_target,
+                )
+                for qt in queue_types
+            ]
+            queue_results = await asyncio.gather(*tasks, return_exceptions=True)
+
             region_total = 0
-            no_progress_loops = 0
-            while region_total < (matches_per_region or 0):
-                remaining = (matches_per_region or 0) - region_total
-                if remaining <= 0:
-                    break
-                qn = max(1, len(queue_types) if queue_types else 1)
-                per_queue_chunk = max(1, min(math.ceil(remaining / qn), settings.MAX_MATCHES_PER_CHUNK))
-                tasks = []
-                for queue_type in queue_types:
-                    tasks.append(local_services[queue_type].scrape_matches_by_date_window(
-                        region=region,
-                        queue_type=queue_type,
-                        max_matches=per_queue_chunk,
-                        seed_puuids=(seed_puuids_by_region.get(region) if seed_puuids_by_region else None)
-                    ))
-                try:
-                    before = region_total
-                    queues_results = await asyncio.gather(*tasks, return_exceptions=True)
-                    for queue_type, res in zip(queue_types, queues_results):
-                        if isinstance(res, Exception):
-                            logger.error(f"Error scraping {region.value} - {queue_type.queue_name}: {res}")
-                            region_results.setdefault(queue_type.queue_name, [])
-                        else:
-                            region_results.setdefault(queue_type.queue_name, [])
-                            take = min(
-                                len(res),
-                                per_queue_chunk,
-                                max(0, (matches_per_region or 0) - region_total),
-                            )
-                            if take > 0:
-                                sliced = res[:take]
-                                region_results[queue_type.queue_name].extend(sliced)
-                                total_collected += len(sliced)
-                                region_total += len(sliced)
-                    if outer_progress_cb:
-                        outer_progress_cb(region_total, 0)
-                    if region_total <= before:
-                        no_progress_loops += 1
-                    else:
-                        no_progress_loops = 0
-                    if no_progress_loops >= 2:
-                        try:
-                            added = 0
-                            for qt in queue_types:
-                                extra = await local_services[qt].seed_service.discover_seed_puuids(region, qt, count=50)
-                                for pu in extra:
-                                    if pu not in local_services[qt].scraped_puuids:
-                                        local_services[qt].scraped_puuids.add(pu)
-                                        added += 1
-                            if added == 0:
-                                try:
-                                    from application.services.data_persistence_service import DataPersistenceService
-                                    db_path = settings.DB_DIR / "scraper.sqlite"
-                                    dp = DataPersistenceService(db_path)
-                                    pool = dp.get_existing_puuids()
-                                    pulled = 0
-                                    for pu in pool:
-                                        if pu not in local_services[QueueType.RANKED_SOLO_5x5].scraped_puuids:
-                                            local_services[QueueType.RANKED_SOLO_5x5].scraped_puuids.add(pu)
-                                            pulled += 1
-                                        if pu not in local_services[QueueType.RANKED_FLEX_SR].scraped_puuids:
-                                            local_services[QueueType.RANKED_FLEX_SR].scraped_puuids.add(pu)
-                                            pulled += 1
-                                        if pulled >= 100:
-                                            break
-                                    if pulled > 0:
-                                        added = pulled
-                                except Exception:
-                                    pass
-                            if added > 0:
-                                no_progress_loops = 0
-                            else:
-                                break
-                        except Exception:
-                            break
-                except Exception as e:
-                    logger.error(f"Error scraping {region.value}: {e}")
-                    break
-            
+            for qt, res in zip(queue_types, queue_results):
+                if isinstance(res, Exception):
+                    logger.error(f"Queue {qt.queue_name} error for {region.value}: {res}")
+                    continue
+                cap    = max(0, matches_per_region - region_total)
+                sliced = res[:cap]
+                region_results[qt.queue_name].extend(sliced)
+                region_total    += len(sliced)
+                total_collected += len(sliced)
+
             results[region.value] = region_results
-            # Optional global cap across all regions
+            logger.info(f"region-done {region.value} collected={region_total}")
+
             if matches_total is not None and total_collected >= matches_total:
-                logger.info(f"Reached overall total guideline: {total_collected}")
                 break
-        
-        # Log summary
-        logger.info(f"Scraping complete!")
+
         return results
-        

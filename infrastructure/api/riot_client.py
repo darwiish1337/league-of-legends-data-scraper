@@ -1,6 +1,7 @@
 """Riot Games API client."""
 import asyncio
 import logging
+import time
 from typing import Optional, Dict, Any, List
 import httpx
 
@@ -12,385 +13,237 @@ logger = logging.getLogger(__name__)
 
 
 class RiotAPIClient:
-    """Asynchronous client for Riot Games API."""
-    
+    """Asynchronous Riot API client with correct rate limiting."""
+
     def __init__(self, api_key: str):
-        """
-        Initialize Riot API client.
-        
-        Args:
-            api_key: Riot Games API key
-        """
-        self.api_key = api_key
+        self.api_key  = api_key
         self.session: Optional[httpx.AsyncClient] = None
-        self.timeout = settings.REQUEST_TIMEOUT
+        self.timeout  = settings.REQUEST_TIMEOUT
         self.last_status_code: Optional[int] = None
-        
-        # Initialize rate limiter
+        self._endpoint_cooldown: dict[str, float] = {}
+
         self.rate_limiter = EndpointRateLimiter()
         self.rate_limiter.set_default_limiter(
-            requests_per_10_sec=settings.RATE_LIMIT_PER_10_SEC,
-            requests_per_10_min=settings.RATE_LIMIT_PER_10_MIN
+            requests_per_1_sec=settings.RATE_LIMIT_PER_1_SEC,
+            requests_per_2_min=settings.RATE_LIMIT_PER_2_MIN,
         )
-        
-        # Add specific endpoint rate limiters based on documentation
         self._setup_endpoint_limiters()
-        # Adaptive cooldown per endpoint after 429 retry-after responses
-        self._endpoint_cooldown: dict[str, float] = {}
-    
+
     def _setup_endpoint_limiters(self) -> None:
-        """Setup rate limiters for specific endpoints."""
         self.rate_limiter.add_endpoint_limiter(
             "match",
-            requests_per_10_sec=settings.MATCH_RATE_LIMIT_PER_10_SEC,
-            requests_per_10_min=settings.MATCH_RATE_LIMIT_PER_10_MIN
+            requests_per_1_sec=settings.MATCH_RATE_LIMIT_PER_1_SEC,
+            requests_per_2_min=settings.MATCH_RATE_LIMIT_PER_2_MIN,
         )
         self.rate_limiter.add_endpoint_limiter(
             "summoner",
-            requests_per_10_sec=settings.SUMMONER_RATE_LIMIT_PER_10_SEC,
-            requests_per_10_min=settings.SUMMONER_RATE_LIMIT_PER_10_MIN
+            requests_per_1_sec=settings.SUMMONER_RATE_LIMIT_PER_1_SEC,
+            requests_per_2_min=settings.SUMMONER_RATE_LIMIT_PER_2_MIN,
         )
         self.rate_limiter.add_endpoint_limiter(
             "league",
-            requests_per_10_sec=settings.LEAGUE_RATE_LIMIT_PER_10_SEC,
-            requests_per_10_min=settings.LEAGUE_RATE_LIMIT_PER_10_MIN
+            requests_per_1_sec=settings.LEAGUE_RATE_LIMIT_PER_1_SEC,
+            requests_per_2_min=settings.LEAGUE_RATE_LIMIT_PER_2_MIN,
         )
-    
+
     async def __aenter__(self):
-        """Async context manager entry."""
-        http2_flag = False
+        http2 = False
         try:
             import h2  # type: ignore
-            http2_flag = True
+            http2 = True
         except Exception:
-            http2_flag = False
-        self.session = httpx.AsyncClient(timeout=self.timeout, headers={'X-Riot-Token': self.api_key}, http2=http2_flag)
+            pass
+        self.session = httpx.AsyncClient(
+            timeout=self.timeout,
+            headers={"X-Riot-Token": self.api_key},
+            http2=http2,
+        )
         return self
-    
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit."""
+
+    async def __aexit__(self, *_):
         if self.session:
             await self.session.aclose()
-    
+
     def _get_platform_url(self, region: Region) -> str:
-        """Get platform-specific base URL."""
         return f"https://{region.platform_route}.api.riotgames.com"
-    
+
     def _get_regional_url(self, region: Region) -> str:
-        """Get regional base URL for account/match APIs."""
         return f"https://{region.regional_route}.api.riotgames.com"
 
     def _platform_host_candidates(self, region: Region) -> list[str]:
-        """
-        For SEA platforms where some subdomains may not resolve (e.g., ph2),
-        try alternative SEA platform hosts as fallbacks to retrieve seed data.
-        """
         if region.regional_route == "sea":
             order = [region.platform_route, "sg2", "th2", "tw2", "vn2", "oc1"]
-            seen = set()
-            return [h for h in order if not (h in seen or seen.add(h))]
+            seen: set = set()
+            return [h for h in order if not (h in seen or seen.add(h))]  # type: ignore
         return [region.platform_route]
 
-    async def _request_platform_with_fallback(self, region: Region, path_suffix: str, endpoint_type: str) -> Optional[Dict[Any, Any]]:
+    async def _request_platform_with_fallback(
+        self, region: Region, path_suffix: str, endpoint_type: str
+    ) -> Optional[Dict[Any, Any]]:
         for host in self._platform_host_candidates(region):
-            base = f"https://{host}.api.riotgames.com"
-            url = f"{base}{path_suffix}"
+            url  = f"https://{host}.api.riotgames.com{path_suffix}"
             data = await self._make_request(url, endpoint_type)
             if data is not None:
                 return data
         return None
-    
+
     async def _make_request(
         self,
         url: str,
         endpoint_type: str = "default",
-        max_retries: int = None
+        max_retries: int = None,
     ) -> Optional[Dict[Any, Any]]:
-        """
-        Make an API request with retry logic.
-        
-        Args:
-            url: Full URL to request
-            endpoint_type: Type of endpoint for rate limiting
-            max_retries: Maximum number of retries
-            
-        Returns:
-            JSON response or None if failed
-        """
         if max_retries is None:
             max_retries = settings.MAX_RETRIES
-        
+
         for attempt in range(max_retries + 1):
             try:
-                # Honor adaptive cooldown for this endpoint
-                try:
-                    import time as _time
-                    cd_until = self._endpoint_cooldown.get(endpoint_type, 0.0)
-                    now = _time.time()
-                    if cd_until > now:
-                        await asyncio.sleep(cd_until - now)
-                except Exception:
-                    pass
-                # Acquire rate limit permission
+                # honour per-endpoint cooldown after 429
+                cd = self._endpoint_cooldown.get(endpoint_type, 0.0)
+                now = time.monotonic()
+                if cd > now:
+                    await asyncio.sleep(cd - now)
+
                 await self.rate_limiter.acquire(endpoint_type)
-                
+
                 response = await self.session.get(url)
                 self.last_status_code = response.status_code
+
+                if response.status_code == 200:
+                    return response.json()
+
                 if response.status_code == 401:
-                    logger.error("Unauthorized (401). Check RIOT_API_KEY or header.")
+                    logger.error("401 Unauthorized — check RIOT_API_KEY")
                     return None
+
+                if response.status_code == 404:
+                    return None
+
                 if response.status_code == 429:
-                    retry_after = int(response.headers.get('Retry-After', '1'))
-                    logger.warning(f"Rate limited. Retrying after {retry_after}s. URL: {url}")
-                    # Set endpoint-wide cooldown to prevent parallel 429 storms
-                    try:
-                        import time as _time
-                        self._endpoint_cooldown[endpoint_type] = _time.time() + retry_after
-                        # Reset endpoint limiter so future scheduling starts fresh
-                        await self.rate_limiter.reset_endpoint(endpoint_type)
-                    except Exception:
-                        pass
+                    retry_after = int(response.headers.get("Retry-After", "5"))
+                    logger.warning(f"429 rate-limited — waiting {retry_after}s")
+                    self._endpoint_cooldown[endpoint_type] = time.monotonic() + retry_after
+                    await self.rate_limiter.reset_endpoint(endpoint_type)
                     await asyncio.sleep(retry_after)
                     continue
-                if response.status_code == 404:
-                    logger.debug(f"Resource not found (404): {url}")
-                    return None
-                if response.status_code >= 400:
-                    logger.error(f"API error {response.status_code} for URL: {url}")
+
+                if response.status_code >= 500:
                     if attempt < max_retries:
-                        wait_time = settings.RETRY_BACKOFF ** attempt
-                        logger.info(f"Retrying in {wait_time}s...")
-                        await asyncio.sleep(wait_time)
+                        wait = settings.RETRY_BACKOFF ** attempt
+                        await asyncio.sleep(wait)
                         continue
                     return None
-                return response.json()
-            
-            except httpx.HTTPError as e:
-                logger.error(f"Network error: {e}. URL: {url}")
+
+                logger.warning(f"HTTP {response.status_code} for {url}")
+                return None
+
+            except httpx.TimeoutException:
                 if attempt < max_retries:
-                    wait_time = settings.RETRY_BACKOFF ** attempt
-                    await asyncio.sleep(wait_time)
+                    await asyncio.sleep(settings.RETRY_BACKOFF ** attempt)
                     continue
                 return None
-            
-            except Exception as e:
-                logger.error(f"Unexpected error: {e}. URL: {url}")
+
+            except httpx.HTTPError as exc:
+                logger.error(f"Network error: {exc}")
+                if attempt < max_retries:
+                    await asyncio.sleep(settings.RETRY_BACKOFF ** attempt)
+                    continue
                 return None
-        
+
+            except Exception as exc:
+                logger.error(f"Unexpected error: {exc}")
+                return None
+
         return None
-    
-    # ==================== Match API ====================
-    
+
+    # ── Match API ──────────────────────────────────────────────────────
+
     async def get_match_ids_by_puuid(
         self,
         region: Region,
         puuid: str,
         queue: QueueType,
         start_time: Optional[int] = None,
-        end_time: Optional[int] = None,
+        end_time:   Optional[int] = None,
         start: int = 0,
-        count: int = 100
+        count: int = 20,
     ) -> List[str]:
-        """
-        Get match IDs for a summoner.
-        
-        Args:
-            region: Server region
-            puuid: Player UUID
-            queue: Queue type (Solo/Duo or Flex)
-            start_time: Epoch timestamp in seconds
-            end_time: Epoch timestamp in seconds
-            start: Starting index
-            count: Number of matches to return (max 100)
-            
-        Returns:
-            List of match IDs
-        """
-        base_url = self._get_regional_url(region)
-        url = f"{base_url}/lol/match/v5/matches/by-puuid/{puuid}/ids"
-        
-        params = {
-            'queue': queue.queue_id,
-            'start': start,
-            'count': min(count, 100)
-        }
-        
+        base = self._get_regional_url(region)
+        params = f"queue={queue.queue_id}&start={start}&count={min(count, 100)}"
         if start_time:
-            params['startTime'] = start_time
+            params += f"&startTime={start_time}"
         if end_time:
-            params['endTime'] = end_time
-        
-        url_with_params = url + '?' + '&'.join(
-            f"{k}={v}" for k, v in params.items()
+            params += f"&endTime={end_time}"
+        url    = f"{base}/lol/match/v5/matches/by-puuid/{puuid}/ids?{params}"
+        result = await self._make_request(url, "match")
+        return result if isinstance(result, list) else []
+
+    async def get_match_by_id(self, region: Region, match_id: str) -> Optional[Dict]:
+        base = self._get_regional_url(region)
+        return await self._make_request(f"{base}/lol/match/v5/matches/{match_id}", "match")
+
+    # ── Summoner API ───────────────────────────────────────────────────
+
+    async def get_summoner_by_puuid(self, region: Region, puuid: str) -> Optional[Dict]:
+        return await self._request_platform_with_fallback(
+            region, f"/lol/summoner/v4/summoners/by-puuid/{puuid}", "summoner"
         )
-        
-        result = await self._make_request(url_with_params, "match")
-        return result if result else []
-    
-    async def get_match_by_id(
-        self,
-        region: Region,
-        match_id: str
-    ) -> Optional[Dict[Any, Any]]:
-        """
-        Get detailed match data by match ID.
-        
-        Args:
-            region: Server region
-            match_id: Match identifier
-            
-        Returns:
-            Match data dictionary or None
-        """
-        base_url = self._get_regional_url(region)
-        url = f"{base_url}/lol/match/v5/matches/{match_id}"
-        
-        return await self._make_request(url, "match")
-    
-    # ==================== Summoner API ====================
-    
-    async def get_summoner_by_puuid(
-        self,
-        region: Region,
-        puuid: str
-    ) -> Optional[Dict[Any, Any]]:
-        """
-        Get summoner data by PUUID.
-        
-        Args:
-            region: Server region
-            puuid: Player UUID
-            
-        Returns:
-            Summoner data or None
-        """
-        path = f"/lol/summoner/v4/summoners/by-puuid/{puuid}"
-        return await self._request_platform_with_fallback(region, path, "summoner")
-    
-    async def get_summoner_by_id(
-        self,
-        region: Region,
-        summoner_id: str
-    ) -> Optional[Dict[Any, Any]]:
-        path = f"/lol/summoner/v4/summoners/{summoner_id}"
-        return await self._request_platform_with_fallback(region, path, "summoner")
-    
-    async def get_summoner_by_name(
-        self,
-        region: Region,
-        summoner_name: str
-    ) -> Optional[Dict[Any, Any]]:
-        path = f"/lol/summoner/v4/summoners/by-name/{summoner_name}"
-        return await self._request_platform_with_fallback(region, path, "summoner")
-    
-    # ==================== League API ====================
+
+    async def get_summoner_by_id(self, region: Region, summoner_id: str) -> Optional[Dict]:
+        return await self._request_platform_with_fallback(
+            region, f"/lol/summoner/v4/summoners/{summoner_id}", "summoner"
+        )
+
+    async def get_summoner_by_name(self, region: Region, name: str) -> Optional[Dict]:
+        return await self._request_platform_with_fallback(
+            region, f"/lol/summoner/v4/summoners/by-name/{name}", "summoner"
+        )
+
+    # ── League API ─────────────────────────────────────────────────────
+
     async def get_league_entries(
         self,
         region: Region,
         queue: QueueType,
         tier: str,
         division: str,
-        page: int = 1
-    ) -> Optional[List[Dict[Any, Any]]]:
-        """
-        Get league entries for a queue, tier, and division (paged).
-        Endpoint: /lol/league/v4/entries/{queue}/{tier}/{division}?page={page}
-        """
-        queue_name = "RANKED_SOLO_5x5" if queue == QueueType.RANKED_SOLO_5x5 else "RANKED_FLEX_SR"
-        path = f"/lol/league/v4/entries/{queue_name}/{tier}/{division}?page={page}"
-        data = await self._request_platform_with_fallback(region, path, "league")
-        return data  # type: ignore[return-value]
-    
-    async def get_league_entries_by_summoner(
-        self,
-        region: Region,
-        summoner_id: str
-    ) -> Optional[List[Dict[Any, Any]]]:
-        """
-        Get ranked league entries for a summoner.
-        
-        Args:
-            region: Server region
-            summoner_id: Summoner ID (encrypted)
-            
-        Returns:
-            List of league entries or None
-        """
-        path = f"/lol/league/v4/entries/by-summoner/{summoner_id}"
-        data = await self._request_platform_with_fallback(region, path, "league")
-        return data  # type: ignore[return-value]
-    
-    async def get_league_entries_by_puuid(
-        self,
-        region: Region,
-        puuid: str
-    ) -> Optional[List[Dict[Any, Any]]]:
-        """
-        Get ranked league entries by PUUID.
-        
-        Args:
-            region: Server region
-            puuid: Player UUID
-            
-        Returns:
-            List of league entries or None
-        """
-        path = f"/lol/league/v4/entries/by-puuid/{puuid}"
-        data = await self._request_platform_with_fallback(region, path, "league")
-        return data  # type: ignore[return-value]
-    
-    async def get_challenger_league(
-        self,
-        region: Region,
-        queue: QueueType
-    ) -> Optional[Dict[Any, Any]]:
-        """
-        Get challenger league for a queue.
-        
-        Args:
-            region: Server region
-            queue: Queue type
-            
-        Returns:
-            Challenger league data or None
-        """
-        path = f"/lol/league/v4/challengerleagues/by-queue/{queue.api_queue_name}"
-        return await self._request_platform_with_fallback(region, path, "league")
-    
-    async def get_grandmaster_league(
-        self,
-        region: Region,
-        queue: QueueType
-    ) -> Optional[Dict[Any, Any]]:
-        """
-        Get grandmaster league for a queue.
-        
-        Args:
-            region: Server region
-            queue: Queue type
-            
-        Returns:
-            Grandmaster league data or None
-        """
-        path = f"/lol/league/v4/grandmasterleagues/by-queue/{queue.api_queue_name}"
-        return await self._request_platform_with_fallback(region, path, "league")
-    
-    async def get_master_league(
-        self,
-        region: Region,
-        queue: QueueType
-    ) -> Optional[Dict[Any, Any]]:
-        """
-        Get master league for a queue.
-        
-        Args:
-            region: Server region
-            queue: Queue type
-            
-        Returns:
-            Master league data or None
-        """
-        path = f"/lol/league/v4/masterleagues/by-queue/{queue.api_queue_name}"
+        page: int = 1,
+    ) -> Optional[List[Dict]]:
+        qname = queue.api_queue_name
+        path  = f"/lol/league/v4/entries/{qname}/{tier}/{division}?page={page}"
         return await self._request_platform_with_fallback(region, path, "league")
 
-    # Note: single implementation of get_league_entries is provided above with fallback.
+    async def get_league_entries_by_summoner(
+        self, region: Region, summoner_id: str
+    ) -> Optional[List[Dict]]:
+        return await self._request_platform_with_fallback(
+            region, f"/lol/league/v4/entries/by-summoner/{summoner_id}", "league"
+        )
+
+    async def get_league_entries_by_puuid(
+        self, region: Region, puuid: str
+    ) -> Optional[List[Dict]]:
+        return await self._request_platform_with_fallback(
+            region, f"/lol/league/v4/entries/by-puuid/{puuid}", "league"
+        )
+
+    async def get_challenger_league(self, region: Region, queue: QueueType) -> Optional[Dict]:
+        return await self._request_platform_with_fallback(
+            region,
+            f"/lol/league/v4/challengerleagues/by-queue/{queue.api_queue_name}",
+            "league",
+        )
+
+    async def get_grandmaster_league(self, region: Region, queue: QueueType) -> Optional[Dict]:
+        return await self._request_platform_with_fallback(
+            region,
+            f"/lol/league/v4/grandmasterleagues/by-queue/{queue.api_queue_name}",
+            "league",
+        )
+
+    async def get_master_league(self, region: Region, queue: QueueType) -> Optional[Dict]:
+        return await self._request_platform_with_fallback(
+            region,
+            f"/lol/league/v4/masterleagues/by-queue/{queue.api_queue_name}",
+            "league",
+        )
