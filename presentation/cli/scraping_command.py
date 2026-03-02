@@ -1,4 +1,4 @@
-"""Scraping CLI command - logo, animated spinner, accurate progress bar."""
+"""Scraping CLI command - spinner, accurate progress bar, NO logo (shown in main menu only)."""
 from __future__ import annotations
 
 import asyncio
@@ -7,7 +7,7 @@ import random
 import shutil
 import socket
 import time
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 from config import settings
 from domain.enums import Region, QueueType
@@ -29,46 +29,90 @@ def _g(s: str) -> str: return f"{_BRIGHT_GREEN}{s}{_RESET}"
 def _c(s: str) -> str: return f"{_CYAN}{s}{_RESET}"
 def _y(s: str) -> str: return f"{_YELLOW}{s}{_RESET}"
 
-# ── Logo ──────────────────────────────────────────────────────────────────────
-_LOGO = r"""
-  ██████╗ ██╗ ██████╗ ████████╗    ███████╗ ██████╗██████╗  █████╗ ██████╗ ███████╗██████╗
-  ██╔══██╗██║██╔═══██╗╚══██╔══╝    ██╔════╝██╔════╝██╔══██╗██╔══██╗██╔══██╗██╔════╝██╔══██╗
-  ██████╔╝██║██║   ██║   ██║       ███████╗██║     ██████╔╝███████║██████╔╝█████╗  ██████╔╝
-  ██╔══██╗██║██║   ██║   ██║       ╚════██║██║     ██╔══██╗██╔══██║██╔═══╝ ██╔══╝  ██╔══██╗
-  ██║  ██║██║╚██████╔╝   ██║       ███████║╚██████╗██║  ██║██║  ██║██║     ███████╗██║  ██║
-  ╚═╝  ╚═╝╚═╝ ╚═════╝    ╚═╝       ╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝
-"""
-_SUBTITLE     = "  League of Legends Ranked Match Data Collector"
 _DIVIDER_CHAR = "═"
 
-def _print_logo() -> None:
-    cols = shutil.get_terminal_size(fallback=(100, 20)).columns
-    div  = _DIVIDER_CHAR * min(cols, 96)
-    print(_g(div))
-    for line in _LOGO.splitlines():
-        print(_g(line))
-    print(_c(_SUBTITLE))
-    print(_g(div))
+# ── Region lookup — hardcoded for reliability ─────────────────────────────────
+# Maps every reasonable short code → platform_route value (lowercase)
+_REGION_ALIASES: Dict[str, str] = {
+    # short      platform_route
+    "euw":       "euw1",
+    "euw1":      "euw1",
+    "eune":      "eun1",
+    "eun1":      "eun1",
+    "na":        "na1",
+    "na1":       "na1",
+    "br":        "br1",
+    "br1":       "br1",
+    "lan":       "la1",
+    "la1":       "la1",
+    "las":       "la2",
+    "la2":       "la2",
+    "kr":        "kr",
+    "jp":        "jp1",
+    "jp1":       "jp1",
+    "oce":       "oc1",
+    "oc1":       "oc1",
+    "ph":        "ph2",
+    "ph2":       "ph2",
+    "sg":        "sg2",
+    "sg2":       "sg2",
+    "th":        "th2",
+    "th2":       "th2",
+    "tw":        "tw2",
+    "tw2":       "tw2",
+    "vn":        "vn2",
+    "vn2":       "vn2",
+    "tr":        "tr1",
+    "tr1":       "tr1",
+    "ru":        "ru",
+    "me":        "me1",
+    "me1":       "me1",
+}
 
 
-# ── Spinner (shown while count == 0) ─────────────────────────────────────────
+def _parse_regions(env_str: str) -> List[Region]:
+    """Parse REGIONS env var into Region objects using flexible alias matching."""
+    codes    = [c.strip().lower() for c in env_str.split(",") if c.strip()]
+    plat_map = {r.platform_route.lower(): r for r in Region.all_regions()}
+    # also add r.value.lower() as key
+    for r in Region.all_regions():
+        plat_map[r.value.lower()] = r
+
+    regions: List[Region] = []
+    unmatched: List[str]  = []
+
+    for code in codes:
+        # direct hit
+        region = plat_map.get(code)
+        # try alias
+        if region is None:
+            plat = _REGION_ALIASES.get(code)
+            if plat:
+                region = plat_map.get(plat)
+        if region is not None:
+            if region not in regions:
+                regions.append(region)
+        else:
+            unmatched.append(code)
+
+    if unmatched:
+        print(f"  {_y('WARNING: unknown region codes skipped:')} {', '.join(unmatched)}")
+
+    return regions
+
+
+# ── Progress bar / spinner ────────────────────────────────────────────────────
 _SPIN_FRAMES = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
 
-class _RegionProgress:
-    """
-    Progress bar that animates a spinner while current == 0 (warm-up / seed
-    discovery phase) so the terminal never looks frozen.
-    """
 
+class _RegionProgress:
     def __init__(self, target: int, label: str) -> None:
         self.target   = max(1, target)
         self.label    = label
         self._start   = time.monotonic()
         self._current = 0
         self._spin_i  = 0
-        self._spin_task: Optional[asyncio.Task] = None
 
-    # called by the async scrape loop
     def update(self, current: int) -> None:
         new = max(self._current, int(current or 0))
         if new > self.target:
@@ -79,36 +123,27 @@ class _RegionProgress:
     def finish(self) -> None:
         self._current = self.target
         self._render()
-        print()   # newline after bar
+        print()
 
     def _render(self) -> None:
         try:
             cols = shutil.get_terminal_size(fallback=(80, 20)).columns
         except Exception:
             cols = 80
-
         elapsed = max(0.0, time.monotonic() - self._start)
 
         if self._current == 0:
-            # ── spinner mode ──────────────────────────────────────────
             frame = _SPIN_FRAMES[self._spin_i % len(_SPIN_FRAMES)]
             self._spin_i += 1
-            elapsed_str = f"{int(elapsed)}s"
-            msg = (
-                f"  {_CYAN}{self.label}{_RESET} │"
-                f" {_g(frame)} {_DIM}discovering seeds…{_RESET}"
-                f" {_y(elapsed_str)}"
-            )
+            msg = (f"  {_CYAN}{self.label}{_RESET} │"
+                   f" {_g(frame)} {_DIM}discovering seeds…{_RESET}"
+                   f" {_y(f'{int(elapsed)}s')}")
             print(f"\r{msg:<{cols}}", end="", flush=True)
         else:
-            # ── bar mode ──────────────────────────────────────────────
-            pct = self._current / self.target
-            if pct > 0:
-                eta_s = int(elapsed * (1.0 - pct) / pct)
-            else:
-                eta_s = 0
-            mm, ss = divmod(eta_s, 60)
-            hh, mm = divmod(mm, 60)
+            pct     = self._current / self.target
+            eta_s   = int(elapsed * (1.0 - pct) / pct) if pct > 0 else 0
+            mm, ss  = divmod(eta_s, 60)
+            hh, mm  = divmod(mm, 60)
             eta_str = f"ETA {hh:02d}:{mm:02d}:{ss:02d}" if hh else f"ETA {mm:02d}:{ss:02d}"
             info    = f"{self._current:,}/{self.target:,}  {int(pct*100):3d}%  {eta_str}"
 
@@ -116,15 +151,10 @@ class _RegionProgress:
             bar_space  = max(10, min(50, cols - prefix_len - len(info) - 6))
             filled     = int(bar_space * pct)
             bar        = _g("█" * filled) + _DIM + "─" * (bar_space - filled) + _RESET
-            prefix     = f"  {_CYAN}{self.label}{_RESET} "
-            line       = f"\r{prefix}│{bar}│ {_y(info)}"
-            print(line, end="", flush=True)
+            print(f"\r  {_CYAN}{self.label}{_RESET} │{bar}│ {_y(info)}", end="", flush=True)
 
-
-# ── Async spinner ticker ──────────────────────────────────────────────────────
 
 async def _tick_spinner(prog: _RegionProgress, interval: float = 0.12) -> None:
-    """Keep the spinner animating while seeds are being discovered."""
     while prog._current == 0:
         prog._render()
         await asyncio.sleep(interval)
@@ -138,19 +168,6 @@ class ScrapingCommand:
         self._target   = settings.MATCHES_PER_REGION
         self._log      = get_logger(__name__, service="scrape-cli")
         self._progress: Optional[_RegionProgress] = None
-
-    # ── banners ───────────────────────────────────────────────────────
-
-    def _print_banner(self) -> None:
-        _print_logo()
-        cols = shutil.get_terminal_size(fallback=(96, 20)).columns
-        div  = _DIVIDER_CHAR * min(cols, 96)
-        print()
-        patch_range = f"  {_BOLD}Patch:{_RESET}  {_g(settings.TARGET_PATCH)}   {_DIM}|{_RESET}  {_BOLD}Date range:{_RESET}  {_c(settings.PATCH_START_DATE)}"
-        if settings.PATCH_END_DATE:
-            patch_range += f" → {_c(settings.PATCH_END_DATE)}"
-        print(patch_range)
-        print(_g(div))
 
     def _print_summary(self, regions: List[Region], queues: List[QueueType]) -> None:
         cols = shutil.get_terminal_size(fallback=(96, 20)).columns
@@ -166,18 +183,12 @@ class ScrapingCommand:
         print(_g(div))
         print()
 
-    # ── progress helpers ──────────────────────────────────────────────
-
     def _make_progress_cb(self, region_target: int, label: str):
         prog = _RegionProgress(region_target, label)
         self._progress = prog
-
         def _cb(current: int, _total: int) -> None:
             prog.update(current)
-
         return _cb
-
-    # ── DNS helpers ───────────────────────────────────────────────────
 
     @staticmethod
     def _dns_resolves(host: str) -> bool:
@@ -188,34 +199,43 @@ class ScrapingCommand:
             return False
 
     @staticmethod
-    def _sea_platform_candidates(region: Region) -> List[str]:
+    def _sea_candidates(region: Region) -> List[str]:
         if region.regional_route == "sea":
             order = [region.platform_route, "sg2", "th2", "tw2", "vn2", "oc1"]
             seen: set = set()
             return [h for h in order if not (h in seen or seen.add(h))]  # type: ignore
         return [region.platform_route]
 
-    # ── main run ──────────────────────────────────────────────────────
-
     async def run(self) -> None:
         settings.validate()
         settings.create_directories()
         self._log.info("start")
 
+        # ── Parse regions ──────────────────────────────────────────────────
         env_regions = os.getenv("REGIONS", "").strip().lower()
         if env_regions and env_regions != "all":
-            codes   = [c.strip() for c in env_regions.split(",") if c.strip()]
-            all_map = {r.value: r for r in Region.all_regions()}
-            regions = [all_map[c] for c in codes if c in all_map] or Region.all_regions()
+            regions = _parse_regions(env_regions)
+            if not regions:
+                print(f"  {_y('No valid regions found in REGIONS env — using all regions')}")
+                regions = Region.all_regions()
         else:
             regions = Region.all_regions()
 
         queues = QueueType.ranked_queues()
 
         db_path     = settings.DB_DIR / "scraper.sqlite"
-        persistence = DataPersistenceService(db_path)   # schema only, no network
+        persistence = DataPersistenceService(db_path)
 
-        self._print_banner()
+        # ── Print config (NO logo here — already shown in main menu) ───────
+        cols = shutil.get_terminal_size(fallback=(96, 20)).columns
+        div  = _DIVIDER_CHAR * min(cols, 96)
+        print()
+        print(f"  {_BOLD}Patch:{_RESET}  {_g(settings.TARGET_PATCH)}"
+              f"   {_DIM}|{_RESET}  "
+              f"{_BOLD}Date range:{_RESET}  {_c(settings.PATCH_START_DATE)}"
+              + (f" → {_c(settings.PATCH_END_DATE)}" if settings.PATCH_END_DATE else ""))
+        print(_g(div))
+
         self._print_summary(regions, queues)
 
         # seed_static_data in background — never blocks scrape
@@ -225,7 +245,6 @@ class ScrapingCommand:
                 await loop.run_in_executor(None, persistence.seed_static_data)
             except Exception:
                 pass
-
         asyncio.create_task(_seed_bg())
 
         async with RiotAPIClient(settings.RIOT_API_KEY) as api:
@@ -236,22 +255,25 @@ class ScrapingCommand:
                     print(f"  {_y('Skipping disabled:')} {region.friendly}")
                     continue
 
-                if settings.RANDOM_SCRAPE:
-                    rt_min        = max(1, settings.RANDOM_REGION_TARGET_MIN)
-                    rt_max        = max(rt_min, settings.RANDOM_REGION_TARGET_MAX)
-                    region_target = random.randint(rt_min, rt_max)
-                else:
-                    region_target = settings.MATCHES_PER_REGION
+                region_target = (
+                    random.randint(
+                        max(1, settings.RANDOM_REGION_TARGET_MIN),
+                        max(1, settings.RANDOM_REGION_TARGET_MAX),
+                    )
+                    if settings.RANDOM_SCRAPE
+                    else settings.MATCHES_PER_REGION
+                )
                 self._target = region_target
 
-                cols = shutil.get_terminal_size(fallback=(96, 20)).columns
+                cols     = shutil.get_terminal_size(fallback=(96, 20)).columns
+                next_txt = (f"   {_DIM}next → {regions[idx+1].friendly}{_RESET}"
+                            if idx + 1 < len(regions) else "")
                 print(f"\n{'─' * min(cols, 60)}")
-                next_txt = f"   {_DIM}next → {regions[idx+1].friendly}{_RESET}" if idx + 1 < len(regions) else ""
                 print(f"  {_BOLD}Server:{_RESET} {_g(region.friendly)}{next_txt}")
                 print(f"  Target : {_c(f'{region_target:,} matches')}")
 
                 # DNS check
-                candidates  = self._sea_platform_candidates(region)
+                candidates  = self._sea_candidates(region)
                 platform_ok = any(self._dns_resolves(f"{h}.api.riotgames.com") for h in candidates)
                 regional_ok = self._dns_resolves(f"{region.regional_route}.api.riotgames.com")
                 seeds_cfg   = bool(settings.SEED_PUUIDS or settings.SEED_SUMMONERS)
@@ -266,10 +288,10 @@ class ScrapingCommand:
                         self._log.warning(f"dns-skip-sea-no-seeds {region.value}")
                         continue
 
-                # Only supply already-known PUUIDs — no blocking pre-flight API calls
+                # Region-specific seeds from DB only (no blocking API calls)
                 db_seeds: List[str] = []
                 try:
-                    db_seeds = persistence.get_existing_puuids()[:200]
+                    db_seeds = persistence.get_existing_puuids_for_region(region.value)[:200]
                 except Exception:
                     pass
                 seed_map = {region: db_seeds} if db_seeds else None
@@ -281,14 +303,10 @@ class ScrapingCommand:
                     status_callback=lambda _: None,
                 )
 
-                # ── Launch spinner + scrape concurrently ──────────────
-                # The spinner animates the progress bar while current==0.
-                # As soon as the first match arrives the bar switches to
-                # normal mode automatically.
                 prog = self._progress
 
                 async def _run_with_spinner():
-                    spinner_task = asyncio.create_task(_tick_spinner(prog))
+                    spinner = asyncio.create_task(_tick_spinner(prog))
                     try:
                         return await use_case.execute(
                             regions=[region],
@@ -298,9 +316,9 @@ class ScrapingCommand:
                             seed_puuids_by_region=seed_map,
                         )
                     finally:
-                        spinner_task.cancel()
+                        spinner.cancel()
                         try:
-                            await spinner_task
+                            await spinner
                         except asyncio.CancelledError:
                             pass
 

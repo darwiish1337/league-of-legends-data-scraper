@@ -39,12 +39,14 @@
 
 | Feature | Description |
 |---|---|
-| 🌍 **Multi-Server Scraping** | Sequential scraping across EUW → EUNE → NA → ... → ME1 |
+| 🌍 **Multi-Server Scraping** | Sequential scraping across all Riot platforms (EUW → EUNE → … → ME1) |
 | 🏆 **Both Queue Types** | Ranked Solo/Duo and Ranked Flex 5v5 per region |
-| 🔖 **Patch Filtering** | Exact (`16.3`) or prefix (`16.*`) patch-aware match filtering |
-| 🎛️ **Console UI** | Live banner, progress bars, and Server/Next Server display |
+| 🔖 **Patch / Date Filtering** | Patch-aware (`16.3` / `16.*`) with tight date window to avoid old games |
+| 🎛️ **Console UI** | Main menu + live per-region progress with ETA and Server/Next Server display |
 | 🗄️ **Durable Storage** | SQLite database + automatic CSV export per table |
-| ⚡ **Async Fetching** | Configurable concurrency with per-endpoint rate limiting |
+| ⚡ **Async Fetching** | Optimised concurrency with per-endpoint rate limiting (1s / 2min windows) |
+| 🧠 **Smart Seeding** | High-elo leagues + DB seeds + optional SEED_PUUIDS / SEED_SUMMONERS |
+| 🧬 **Rich Reference Data** | Champions with roles, items, and summoner spells from Data Dragon |
 | 📋 **Enterprise Logging** | Colored console + structured JSON logs with context binding |
 | 🩺 **Health System** | DNS + HTTP checks with Adaptive Retry and Circuit Breaker |
 | 🗑️ **Data Management** | Interactive CLI + programmatic table clearing |
@@ -106,6 +108,31 @@ riot_data_scraper/
 │
 └── 🚀 main.py                      # Minimal entrypoint with main menu
 ```
+
+---
+
+## 🔁 Key Implementation Improvements
+
+- **Correct rate limits**
+  - Uses realistic Riot limits per 1 second and per 2 minutes instead of a slow 10‑minute window.
+  - Separate budgets for match, summoner, and league endpoints to keep the pipeline fast and safe.
+- **Tight patch window**
+  - Defaults to `TARGET_PATCH=16.3` with `PATCH_START_DATE` set near the actual release date.
+  - Avoids downloading years of old matches only to discard them as off‑patch.
+- **Per-region PUUID isolation**
+  - Global set of `scraped_match_ids` prevents re-downloading the same match across runs.
+  - Region-local PUUID pools ensure EUW seeds are not reused on EUNE (faster discovery, fewer empty calls).
+- **Smarter seeding**
+  - Bootstraps from Challenger/GM/Master leagues, DB seeds, and optional `SEED_PUUIDS` / `SEED_SUMMONERS`.
+  - Falls back gracefully if some platforms (especially SEA) have DNS issues.
+- **Better match tables**
+  - `matches` includes both ISO date and `match_date_simple` (e.g. `2/2/2026`) plus `duration_mmss` (`45:00`, `30:00`).
+  - `participants` stores full rank tier/division, items, spells, and per-player damage/gold stats.
+- **Full reference coverage**
+  - `champions` table stores every champion with inferred lane roles (e.g. `Top, Middle, Support`).
+  - `items` and `summoner_spells` are seeded from Data Dragon with human-readable names.
+- **Role normalization**
+  - Role enum maps common aliases (`SUP`, `UTILITY`, `ADC`, `BOT`, `MID`, `JG`) into canonical roles like `SUPPORT` and `BOTTOM`.
 
 ---
 

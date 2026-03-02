@@ -1,4 +1,4 @@
-"""Use case for scraping match data - one continuous run per queue."""
+"""Use case for scraping match data - per-region PUUID isolation."""
 from __future__ import annotations
 
 import asyncio
@@ -16,9 +16,18 @@ logger = logging.getLogger(__name__)
 
 class ScrapeMatchesUseCase:
     """
-    Runs each queue as a single continuous scrape until the region target
-    is met.  No chunking — the DataScraperService loop handles everything
-    internally and keeps discovering new PUUIDs automatically.
+    Scrapes matches region by region.
+
+    PUUID isolation (KEY FIX):
+    ─────────────────────────────────────────────────────────────────
+    scraped_match_ids  →  GLOBAL  (never re-download the same match)
+    scraped_puuids     →  PER-REGION  (EUW players don't play on EUNE)
+    processed_puuids   →  PER-REGION  (fresh start each region)
+
+    Without this isolation, after EUW finishes with ~6,000 PUUIDs,
+    EUNE would try all of them on its servers → 0 matches found →
+    wastes thousands of API calls before finding real EUNE seeds.
+    ─────────────────────────────────────────────────────────────────
     """
 
     def __init__(
@@ -33,19 +42,14 @@ class ScrapeMatchesUseCase:
         self._progress_cb  = progress_callback
         self._status_cb    = status_callback
 
-        # Shared sets — pre-loaded from DB so we never re-fetch old data
-        self._scraped_match_ids: set = set()
-        self._scraped_puuids:    set = set()
+        # Only match IDs are global — prevents re-fetching the same match
+        self._global_match_ids: set = set()
         try:
             from application.services.data_persistence_service import DataPersistenceService
-            db_path = settings.DB_DIR / "scraper.sqlite"
-            p = DataPersistenceService(db_path)
-            self._scraped_match_ids.update(p.get_existing_match_ids())
-            self._scraped_puuids.update(p.get_existing_puuids())
+            p = DataPersistenceService(settings.DB_DIR / "scraper.sqlite")
+            self._global_match_ids.update(p.get_existing_match_ids())
         except Exception:
             pass
-
-    # ------------------------------------------------------------------ #
 
     async def execute(
         self,
@@ -67,15 +71,29 @@ class ScrapeMatchesUseCase:
 
         for region in regions:
             region_results: Dict[str, List[Match]] = {qt.queue_name: [] for qt in queue_types}
-
-            # Each queue scrapes half the target concurrently
             per_queue_target = max(1, (matches_per_region + n_queues - 1) // n_queues)
 
-            # Totals across queues — used for the single shared progress bar
+            # ── Fresh PUUID pool for THIS region only ──────────────────────
+            region_puuids: set = set()
+            try:
+                from application.services.data_persistence_service import DataPersistenceService
+                p = DataPersistenceService(settings.DB_DIR / "scraper.sqlite")
+                # Only load PUUIDs that were previously found ON this region
+                region_puuids.update(p.get_existing_puuids_for_region(region.value))
+            except Exception:
+                pass
+
+            # Add any caller-supplied seeds for this region
+            if seed_puuids_by_region:
+                for pu in seed_puuids_by_region.get(region, []):
+                    if pu:
+                        region_puuids.add(pu)
+
+            # ── Shared progress counter across both queues ─────────────────
             counts: Dict[str, int] = {qt.queue_name: 0 for qt in queue_types}
 
             def _make_cb(qname: str):
-                def _cb(current: int, _total: int) -> None:
+                def _cb(current: int, _t: int) -> None:
                     cur = max(0, int(current or 0))
                     if cur > counts[qname]:
                         counts[qname] = cur
@@ -84,7 +102,7 @@ class ScrapeMatchesUseCase:
                         self._progress_cb(combined, matches_per_region)
                 return _cb
 
-            # Build one DataScraperService per queue; share global id/puuid pools
+            # ── One service per queue, sharing the region PUUID pool ───────
             services: Dict[QueueType, DataScraperService] = {}
             for qt in queue_types:
                 svc = DataScraperService(
@@ -93,17 +111,13 @@ class ScrapeMatchesUseCase:
                     progress_callback=_make_cb(qt.queue_name),
                     status_callback=self._status_cb,
                 )
-                # Share the global dedup pools
-                svc.scraped_match_ids = self._scraped_match_ids
-                svc.scraped_puuids    = self._scraped_puuids
-                # Inject any external seeds
-                if seed_puuids_by_region:
-                    for p in seed_puuids_by_region.get(region, []):
-                        if p and p not in self._scraped_puuids:
-                            self._scraped_puuids.add(p)
+                # Global match IDs: shared across all regions/queues
+                svc.scraped_match_ids = self._global_match_ids
+                # Region-local PUUIDs: shared between solo/flex of SAME region only
+                svc.scraped_puuids = region_puuids
                 services[qt] = svc
 
-            # Run all queues concurrently in a single gather — no outer loop
+            # ── Run queues concurrently ────────────────────────────────────
             tasks = [
                 services[qt].scrape_matches_by_date_window(
                     region=region,
@@ -117,7 +131,7 @@ class ScrapeMatchesUseCase:
             region_total = 0
             for qt, res in zip(queue_types, queue_results):
                 if isinstance(res, Exception):
-                    logger.error(f"Queue {qt.queue_name} error for {region.value}: {res}")
+                    logger.error(f"{region.value}/{qt.queue_name}: {res}")
                     continue
                 cap    = max(0, matches_per_region - region_total)
                 sliced = res[:cap]
