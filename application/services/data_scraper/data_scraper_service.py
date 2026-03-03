@@ -1,4 +1,4 @@
-"""Data scraper service - single continuous loop per region/queue."""
+"""Data scraper service – continuous loop per region and queue."""
 from __future__ import annotations
 
 import asyncio
@@ -17,15 +17,10 @@ logger = logging.getLogger(__name__)
 
 class DataScraperService:
     """
-    Scrapes matches for one region+queue until max_matches is reached.
+    Scrapes matches for a single (region, queue_type) pair.
 
-    Design:
-    - Maintains a puuid_queue (FIFO).
-    - Pops batches of MAX_CONCURRENT_REQUESTS puuids, fetches their
-      match IDs, downloads match details concurrently.
-    - Newly discovered participant PUUIDs are appended to the queue.
-    - When the queue runs dry it asks SeedDiscoveryService for more.
-    - Never returns early unless truly exhausted after multiple retries.
+    Uses a PUUID work queue, fetches match IDs in batches, and downloads
+    match details concurrently while discovering new PUUIDs from games.
     """
 
     def __init__(

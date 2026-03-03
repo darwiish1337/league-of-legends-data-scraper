@@ -9,22 +9,6 @@ load_dotenv(dotenv_path=ENV_PATH)
 
 
 class Settings:
-    """
-    ─── WHY THE OLD CODE WAS SLOW ────────────────────────────────────────
-    1. PATCH_START_DATE = 2020-01-01
-       → fetched 5 years of matches, discarded 98% (wrong patch)
-       → wasted 40× the API quota
-
-    2. RateLimiter used a 600-second window
-       Riot's actual limit is 100 req / 120 seconds (2 minutes).
-       After 95 requests the old limiter waited 10 minutes instead of 2.
-       → 5× slower than it needed to be
-
-    3. MAX_CONCURRENT_REQUESTS = 8, limits = 10/10s
-       → very conservative, left most of the quota unused
-    ──────────────────────────────────────────────────────────────────────
-    """
-
     RIOT_API_KEY: str = os.getenv('RIOT_API_KEY', '')
 
     # ── Rate limits (per 1 second / per 2 minutes = Riot's actual windows) ──
@@ -42,7 +26,7 @@ class Settings:
     LEAGUE_RATE_LIMIT_PER_1_SEC:    int = 15
     LEAGUE_RATE_LIMIT_PER_2_MIN:    int = 75
 
-    # ── Patch ─────────────────────────────────────────────────────────────
+    # ── Patch window ─────────────────────────────────────────────────────
     TARGET_PATCH:     str = os.getenv('TARGET_PATCH',      '16.3')
     # Patch 16.3 released ~2026-02-05. MUST be set correctly or the scraper
     # downloads years of old matches and discards them all.
@@ -69,8 +53,7 @@ class Settings:
     MATCHES_PER_REGION:   int        = 3020
     MATCHES_TOTAL:        Optional[int] = int(os.getenv('MATCHES_TOTAL', '0')) or None
 
-    # With a tight date window (2-3 weeks) most IDs will be on-patch.
-    # 20 IDs per call is enough and avoids downloading stale matches.
+    # IDs_PER_PUUID controls how many match IDs are fetched per player.
     IDS_PER_PUUID: int = int(os.getenv('IDS_PER_PUUID', '20'))
 
     MAX_MATCHES_PER_CHUNK: int = int(os.getenv('MAX_MATCHES_PER_CHUNK', '200'))

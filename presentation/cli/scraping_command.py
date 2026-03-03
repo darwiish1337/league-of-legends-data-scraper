@@ -1,23 +1,23 @@
-"""Scraping CLI command - spinner, accurate progress bar, NO logo (shown in main menu only)."""
+"""Scraping CLI command – runs the main scraping flow from the menu."""
 from __future__ import annotations
 
 import asyncio
 import os
 import random
+import re
 import shutil
-import socket
 import time
-from typing import List, Optional, Dict
+import uuid
+from typing import Any, Dict, List, Optional
 
 from config import settings
 from domain.enums import Region, QueueType
-from infrastructure import RiotAPIClient, SummonerRepository
-from application.use_cases import ScrapeMatchesUseCase
-from application.services.data_persistence_service import DataPersistenceService
-from application.services.seed import SeedDiscoveryService
+from infrastructure import RiotAPIClient
+from infrastructure.health import DNSChecker
+from application.services import DataPersistenceService, RegionScrapeRunner
+from infrastructure.notifications import Notifier
 from core.logging.logger import get_logger
 
-# ── ANSI ─────────────────────────────────────────────────────────────────────
 _BRIGHT_GREEN = "\033[1;92m"
 _CYAN         = "\033[96m"
 _YELLOW       = "\033[93m"
@@ -31,60 +31,36 @@ def _y(s: str) -> str: return f"{_YELLOW}{s}{_RESET}"
 
 _DIVIDER_CHAR = "═"
 
-# ── Region lookup — hardcoded for reliability ─────────────────────────────────
-# Maps every reasonable short code → platform_route value (lowercase)
 _REGION_ALIASES: Dict[str, str] = {
-    # short      platform_route
-    "euw":       "euw1",
-    "euw1":      "euw1",
-    "eune":      "eun1",
-    "eun1":      "eun1",
-    "na":        "na1",
-    "na1":       "na1",
-    "br":        "br1",
-    "br1":       "br1",
-    "lan":       "la1",
-    "la1":       "la1",
-    "las":       "la2",
-    "la2":       "la2",
-    "kr":        "kr",
-    "jp":        "jp1",
-    "jp1":       "jp1",
-    "oce":       "oc1",
-    "oc1":       "oc1",
-    "ph":        "ph2",
-    "ph2":       "ph2",
-    "sg":        "sg2",
-    "sg2":       "sg2",
-    "th":        "th2",
-    "th2":       "th2",
-    "tw":        "tw2",
-    "tw2":       "tw2",
-    "vn":        "vn2",
-    "vn2":       "vn2",
-    "tr":        "tr1",
-    "tr1":       "tr1",
-    "ru":        "ru",
-    "me":        "me1",
-    "me1":       "me1",
+    "euw":  "euw1", "euw1": "euw1",
+    "eune": "eun1", "eun1": "eun1",
+    "na":   "na1",  "na1":  "na1",
+    "br":   "br1",  "br1":  "br1",
+    "lan":  "la1",  "la1":  "la1",
+    "las":  "la2",  "la2":  "la2",
+    "kr":   "kr",
+    "jp":   "jp1",  "jp1":  "jp1",
+    "oce":  "oc1",  "oc1":  "oc1",
+    "ph":   "ph2",  "ph2":  "ph2",
+    "sg":   "sg2",  "sg2":  "sg2",
+    "th":   "th2",  "th2":  "th2",
+    "tw":   "tw2",  "tw2":  "tw2",
+    "vn":   "vn2",  "vn2":  "vn2",
+    "tr":   "tr1",  "tr1":  "tr1",
+    "ru":   "ru",
+    "me":   "me1",  "me1":  "me1",
 }
 
 
 def _parse_regions(env_str: str) -> List[Region]:
-    """Parse REGIONS env var into Region objects using flexible alias matching."""
     codes    = [c.strip().lower() for c in env_str.split(",") if c.strip()]
     plat_map = {r.platform_route.lower(): r for r in Region.all_regions()}
-    # also add r.value.lower() as key
     for r in Region.all_regions():
         plat_map[r.value.lower()] = r
-
-    regions: List[Region] = []
-    unmatched: List[str]  = []
-
+    regions:   List[Region] = []
+    unmatched: List[str]    = []
     for code in codes:
-        # direct hit
         region = plat_map.get(code)
-        # try alias
         if region is None:
             plat = _REGION_ALIASES.get(code)
             if plat:
@@ -94,14 +70,11 @@ def _parse_regions(env_str: str) -> List[Region]:
                 regions.append(region)
         else:
             unmatched.append(code)
-
     if unmatched:
         print(f"  {_y('WARNING: unknown region codes skipped:')} {', '.join(unmatched)}")
-
     return regions
 
 
-# ── Progress bar / spinner ────────────────────────────────────────────────────
 _SPIN_FRAMES = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
 
 
@@ -112,16 +85,24 @@ class _RegionProgress:
         self._start   = time.monotonic()
         self._current = 0
         self._spin_i  = 0
+        self._phase   = "seeds"
+
+    def set_processing(self) -> None:
+        if self._phase == "seeds":
+            self._phase = "processing"
 
     def update(self, current: int) -> None:
         new = max(self._current, int(current or 0))
         if new > self.target:
             self.target = new
         self._current = new
+        if new > 0:
+            self._phase = "running"
         self._render()
 
     def finish(self) -> None:
         self._current = self.target
+        self._phase   = "running"
         self._render()
         print()
 
@@ -132,12 +113,13 @@ class _RegionProgress:
             cols = 80
         elapsed = max(0.0, time.monotonic() - self._start)
 
-        if self._current == 0:
-            frame = _SPIN_FRAMES[self._spin_i % len(_SPIN_FRAMES)]
+        if self._phase in ("seeds", "processing"):
+            frame  = _SPIN_FRAMES[self._spin_i % len(_SPIN_FRAMES)]
             self._spin_i += 1
-            msg = (f"  {_CYAN}{self.label}{_RESET} │"
-                   f" {_g(frame)} {_DIM}discovering seeds…{_RESET}"
-                   f" {_y(f'{int(elapsed)}s')}")
+            label2 = "discovering seeds…" if self._phase == "seeds" else "processing players…"
+            msg    = (f"  {_CYAN}{self.label}{_RESET} │"
+                      f" {_g(frame)} {_DIM}{label2}{_RESET}"
+                      f" {_y(f'{int(elapsed)}s')}")
             print(f"\r{msg:<{cols}}", end="", flush=True)
         else:
             pct     = self._current / self.target
@@ -146,21 +128,22 @@ class _RegionProgress:
             hh, mm  = divmod(mm, 60)
             eta_str = f"ETA {hh:02d}:{mm:02d}:{ss:02d}" if hh else f"ETA {mm:02d}:{ss:02d}"
             info    = f"{self._current:,}/{self.target:,}  {int(pct*100):3d}%  {eta_str}"
-
             prefix_len = 2 + len(self.label) + 1
             bar_space  = max(10, min(50, cols - prefix_len - len(info) - 6))
             filled     = int(bar_space * pct)
             bar        = _g("█" * filled) + _DIM + "─" * (bar_space - filled) + _RESET
-            print(f"\r  {_CYAN}{self.label}{_RESET} │{bar}│ {_y(info)}", end="", flush=True)
+            # FIX: pad to full terminal width to erase leftover chars from previous render
+            line        = f"  {_CYAN}{self.label}{_RESET} │{bar}│ {_y(info)}"
+            visible_len = len(re.sub(r"\033\[[0-9;]*m", "", line))
+            padding     = max(0, cols - visible_len - 1)
+            print(f"\r{line}{' ' * padding}", end="", flush=True)
 
 
 async def _tick_spinner(prog: _RegionProgress, interval: float = 0.12) -> None:
-    while prog._current == 0:
+    while prog._phase in ("seeds", "processing"):
         prog._render()
         await asyncio.sleep(interval)
 
-
-# ── Main command ──────────────────────────────────────────────────────────────
 
 class ScrapingCommand:
 
@@ -168,6 +151,7 @@ class ScrapingCommand:
         self._target   = settings.MATCHES_PER_REGION
         self._log      = get_logger(__name__, service="scrape-cli")
         self._progress: Optional[_RegionProgress] = None
+        self._notifier = Notifier()
 
     def _print_summary(self, regions: List[Region], queues: List[QueueType]) -> None:
         cols = shutil.get_terminal_size(fallback=(96, 20)).columns
@@ -190,28 +174,11 @@ class ScrapingCommand:
             prog.update(current)
         return _cb
 
-    @staticmethod
-    def _dns_resolves(host: str) -> bool:
-        try:
-            socket.getaddrinfo(host, None)
-            return True
-        except Exception:
-            return False
-
-    @staticmethod
-    def _sea_candidates(region: Region) -> List[str]:
-        if region.regional_route == "sea":
-            order = [region.platform_route, "sg2", "th2", "tw2", "vn2", "oc1"]
-            seen: set = set()
-            return [h for h in order if not (h in seen or seen.add(h))]  # type: ignore
-        return [region.platform_route]
-
     async def run(self) -> None:
         settings.validate()
         settings.create_directories()
         self._log.info("start")
 
-        # ── Parse regions ──────────────────────────────────────────────────
         env_regions = os.getenv("REGIONS", "").strip().lower()
         if env_regions and env_regions != "all":
             regions = _parse_regions(env_regions)
@@ -221,12 +188,13 @@ class ScrapingCommand:
         else:
             regions = Region.all_regions()
 
-        queues = QueueType.ranked_queues()
-
+        queues      = QueueType.ranked_queues()
         db_path     = settings.DB_DIR / "scraper.sqlite"
         persistence = DataPersistenceService(db_path)
 
-        # ── Print config (NO logo here — already shown in main menu) ───────
+        session_id:      Optional[str]             = None
+        session_regions: Dict[str, Dict[str, Any]] = {}
+
         cols = shutil.get_terminal_size(fallback=(96, 20)).columns
         div  = _DIVIDER_CHAR * min(cols, 96)
         print()
@@ -236,9 +204,41 @@ class ScrapingCommand:
               + (f" → {_c(settings.PATCH_END_DATE)}" if settings.PATCH_END_DATE else ""))
         print(_g(div))
 
+        # ── Resume support ─────────────────────────────────────────────────
+        incomplete = persistence.get_incomplete_sessions()
+        if incomplete:
+            latest   = incomplete[0]
+            sess_id  = latest["session_id"]
+            reg_rows = persistence.get_session_regions(sess_id)
+            done     = [r["region"] for r in reg_rows if r["status"] == "completed"]
+            cols_box = shutil.get_terminal_size(fallback=(96, 20)).columns
+            div_box  = "─" * min(cols_box, 57)
+            print(f"\n{_g('┌' + div_box + '┐')}")
+            print(f"  {_BOLD}INCOMPLETE SESSION FOUND{_RESET}")
+            print(f"  Started : {latest['started_at']}  Patch: {latest['patch']}")
+            if done:
+                preview = ", ".join(done[:3])
+                more    = max(0, len(reg_rows) - len(done))
+                tail    = f"  ({more} remaining)" if more else ""
+                print(f"  Done    : {_g(preview + ' ✓')}{tail}")
+            remaining_count = len([r for r in reg_rows if r["status"] != "completed"])
+            print(f"  Pending : {_c(str(remaining_count))} regions")
+            print()
+            print(f"  {_c('R')}  Resume latest    {_c('N')}  Start fresh    {_c('0')}  Cancel")
+            print(_g("└" + div_box + "┘"))
+            choice = input("  Choose: ").strip().lower()
+            if choice == "0":
+                return
+            elif choice == "r":
+                session_id      = sess_id
+                session_regions = {r["region"]: r for r in reg_rows}
+                regions         = [Region[r["region"]] for r in reg_rows]
+                self._target    = int(latest["target"])
+            elif choice == "n":
+                persistence.update_session_status(sess_id, "interrupted")
+
         self._print_summary(regions, queues)
 
-        # seed_static_data in background — never blocks scrape
         async def _seed_bg() -> None:
             try:
                 loop = asyncio.get_event_loop()
@@ -248,105 +248,159 @@ class ScrapingCommand:
         asyncio.create_task(_seed_bg())
 
         async with RiotAPIClient(settings.RIOT_API_KEY) as api:
-            total_all = 0
+            runner      = RegionScrapeRunner(api, persistence)
+            total_all   = 0
+            started_any = False
+            start_ts    = time.monotonic()
 
-            for idx, region in enumerate(regions):
-                if region.value.lower() in settings.DISABLED_REGIONS:
-                    print(f"  {_y('Skipping disabled:')} {region.friendly}")
-                    continue
-
-                region_target = (
-                    random.randint(
-                        max(1, settings.RANDOM_REGION_TARGET_MIN),
-                        max(1, settings.RANDOM_REGION_TARGET_MAX),
-                    )
-                    if settings.RANDOM_SCRAPE
-                    else settings.MATCHES_PER_REGION
-                )
-                self._target = region_target
-
-                cols     = shutil.get_terminal_size(fallback=(96, 20)).columns
-                next_txt = (f"   {_DIM}next → {regions[idx+1].friendly}{_RESET}"
-                            if idx + 1 < len(regions) else "")
-                print(f"\n{'─' * min(cols, 60)}")
-                print(f"  {_BOLD}Server:{_RESET} {_g(region.friendly)}{next_txt}")
-                print(f"  Target : {_c(f'{region_target:,} matches')}")
-
-                # DNS check
-                candidates  = self._sea_candidates(region)
-                platform_ok = any(self._dns_resolves(f"{h}.api.riotgames.com") for h in candidates)
-                regional_ok = self._dns_resolves(f"{region.regional_route}.api.riotgames.com")
-                seeds_cfg   = bool(settings.SEED_PUUIDS or settings.SEED_SUMMONERS)
-
-                if region.regional_route == "sea" and not platform_ok:
-                    if not regional_ok:
-                        print(f"  {_y('DNS check failed for SEA. Skipping.')}")
-                        self._log.warning(f"dns-skip-sea-all {region.value}")
-                        continue
-                    if not seeds_cfg:
-                        print(f"  {_y('DNS platform failed. Provide SEED_PUUIDS/SEED_SUMMONERS. Skipping.')}")
-                        self._log.warning(f"dns-skip-sea-no-seeds {region.value}")
-                        continue
-
-                # Region-specific seeds from DB only (no blocking API calls)
-                db_seeds: List[str] = []
-                try:
-                    db_seeds = persistence.get_existing_puuids_for_region(region.value)[:200]
-                except Exception:
-                    pass
-                seed_map = {region: db_seeds} if db_seeds else None
-
-                progress_cb = self._make_progress_cb(region_target, region.value.upper())
-                use_case    = ScrapeMatchesUseCase(
-                    api,
-                    progress_callback=progress_cb,
-                    status_callback=lambda _: None,
+            if session_id is None:
+                session_id = str(uuid.uuid4())
+                persistence.create_session(
+                    session_id,
+                    [r.name for r in regions],
+                    self._target,
+                    settings.TARGET_PATCH,
                 )
 
-                prog = self._progress
+            try:
+                for idx, region in enumerate(regions):
 
-                async def _run_with_spinner():
-                    spinner = asyncio.create_task(_tick_spinner(prog))
-                    try:
-                        return await use_case.execute(
-                            regions=[region],
-                            queue_types=queues,
-                            matches_per_region=region_target,
-                            matches_total=None,
-                            seed_puuids_by_region=seed_map,
+                    if region.value.lower() in settings.DISABLED_REGIONS:
+                        print(f"  {_y('Skipping disabled:')} {region.friendly}")
+                        persistence.mark_region_skipped(session_id, region.name)
+                        continue
+
+                    region_info = session_regions.get(region.name)
+                    if region_info and region_info.get("status") == "completed":
+                        mc = int(region_info.get("matches_collected") or 0)
+                        print(f"  {_g('✓')} {region.friendly}  "
+                              f"already completed ({mc:,} matches) — skipping")
+                        continue
+
+                    region_target = (
+                        random.randint(
+                            max(1, settings.RANDOM_REGION_TARGET_MIN),
+                            max(1, settings.RANDOM_REGION_TARGET_MAX),
                         )
-                    finally:
-                        spinner.cancel()
+                        if settings.RANDOM_SCRAPE
+                        else settings.MATCHES_PER_REGION
+                    )
+                    self._target = region_target
+
+                    cols     = shutil.get_terminal_size(fallback=(96, 20)).columns
+                    next_txt = (
+                        f"   {_DIM}next → {regions[idx+1].friendly}{_RESET}"
+                        if idx + 1 < len(regions) else ""
+                    )
+                    print(f"\n{'─' * min(cols, 60)}")
+                    print(f"  {_BOLD}Server:{_RESET} {_g(region.friendly)}{next_txt}")
+                    print(f"  Target : {_c(f'{region_target:,} matches')}")
+
+                    candidates  = DNSChecker.platform_candidates_for_region(region)
+                    platform_ok = any(
+                        DNSChecker.resolves(f"{h}.api.riotgames.com") for h in candidates
+                    )
+                    regional_ok = DNSChecker.resolves(
+                        f"{region.regional_route}.api.riotgames.com"
+                    )
+                    seeds_cfg = bool(settings.SEED_PUUIDS or settings.SEED_SUMMONERS)
+
+                    if region.regional_route == "sea" and not platform_ok:
+                        if not regional_ok:
+                            print(f"  {_y('DNS check failed for SEA. Skipping.')}")
+                            self._log.warning(f"dns-skip-sea-all {region.value}")
+                            persistence.mark_region_skipped(session_id, region.name)
+                            continue
+                        if not seeds_cfg:
+                            print(f"  {_y('DNS platform failed. Provide SEED_PUUIDS/SEED_SUMMONERS. Skipping.')}")
+                            self._log.warning(f"dns-skip-sea-no-seeds {region.value}")
+                            persistence.mark_region_skipped(session_id, region.name)
+                            continue
+
+                    persistence.mark_region_running(session_id, region.name)
+
+                    progress_cb  = self._make_progress_cb(region_target, region.value.upper())
+                    prog         = self._progress
+                    region_start = time.monotonic()
+
+                    async def _run_with_spinner(
+                        _prog=prog, _region=region, _region_target=region_target
+                    ):
+                        spinner = asyncio.create_task(_tick_spinner(_prog))
                         try:
-                            await spinner
-                        except asyncio.CancelledError:
-                            pass
+                            return await runner.run_region(
+                                region=_region,
+                                queues=queues,
+                                target=_region_target,
+                                progress_cb=progress_cb,
+                                seeds_ready_cb=_prog.set_processing,
+                            )
+                        finally:
+                            spinner.cancel()
+                            try:
+                                await spinner
+                            except asyncio.CancelledError:
+                                pass
 
-                results = await _run_with_spinner()
+                    try:
+                        region_matches = await _run_with_spinner()
+                    except Exception as exc:
+                        self._log.error(f"region-error {region.value} {exc}")
+                        persistence.mark_region_skipped(session_id, region.name)
+                        self._notifier.notify_error(region.value, str(exc))
+                        continue
 
-                if self._progress:
-                    self._progress.finish()
+                    if self._progress:
+                        self._progress.finish()
 
-                region_matches: list = []
-                for region_data in results.values():
-                    for matches in region_data.values():
-                        region_matches.extend(matches)
+                    elapsed_s   = max(0.0, time.monotonic() - region_start)
+                    mm, ss      = divmod(int(elapsed_s), 60)
+                    hh, mm      = divmod(mm, 60)
+                    elapsed_str = f"{hh}h {mm}m {ss}s" if hh else f"{mm}m {ss}s"
 
-                total_all += len(region_matches)
-                self._log.success(f"region-complete {region.value} count={len(region_matches)}")
+                    total_all   += len(region_matches)
+                    started_any  = True
+                    self._log.success(
+                        f"region-complete {region.value} count={len(region_matches)}"
+                    )
 
-                print(f"\n  {_g('✓')} {region.friendly}: {_c(f'{len(region_matches):,}')} matches collected")
-                print(f"  Saving to database…", end="", flush=True)
-                persistence.save_raw_matches(region_matches)
-                print(f" {_g('done')}")
-                print(f"  Exporting CSV…", end="", flush=True)
-                persistence.export_tables_csv(settings.CSV_DIR)
-                print(f" {_g('done')}")
+                    print(f"\n  {_g('✓')} {region.friendly}: "
+                          f"{_c(f'{len(region_matches):,}')} matches collected")
+                    print("  Saving to database…", end="", flush=True)
+                    persistence.save_raw_matches(region_matches)
+                    print(f" {_g('done')}")
+                    print("  Exporting CSV…", end="", flush=True)
+                    persistence.export_tables_csv(settings.CSV_DIR)
+                    print(f" {_g('done')}")
+
+                    persistence.mark_region_completed(
+                        session_id, region.name, len(region_matches)
+                    )
+                    self._notifier.notify_region_complete(
+                        region.value, len(region_matches), elapsed_str
+                    )
+
+                if started_any:
+                    persistence.update_session_status(session_id, "completed")
+
+            except KeyboardInterrupt:
+                persistence.update_session_status(session_id, "interrupted")
+                self._log.warning("scrape interrupted by user")
+                raise
+
+            total_elapsed = max(0.0, time.monotonic() - start_ts)
+            mm, ss  = divmod(int(total_elapsed), 60)
+            hh, mm  = divmod(mm, 60)
+            total_elapsed_str = f"{hh}h {mm}m {ss}s" if hh else f"{mm}m {ss}s"
 
             cols = shutil.get_terminal_size(fallback=(96, 20)).columns
             print(f"\n{_g('═' * min(cols, 96))}")
-            print(f"  {_BOLD}All done!{_RESET}  Total: {_g(f'{total_all:,}')} matches")
+            print(f"  {_BOLD}All done!{_RESET}  Total: {_g(f'{total_all:,}')} matches  "
+                  f"{_DIM}({total_elapsed_str}){_RESET}")
             print(f"  DB  : {_c(str(settings.DB_DIR))}")
             print(f"  CSV : {_c(str(settings.CSV_DIR))}")
             print(_g("═" * min(cols, 96)))
             self._log.info(f"all-done total={total_all}")
+
+            if started_any:
+                self._notifier.notify_all_complete(total_all, total_elapsed_str)

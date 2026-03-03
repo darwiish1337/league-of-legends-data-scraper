@@ -48,7 +48,7 @@
 | 🧠 **Smart Seeding** | High-elo leagues + DB seeds + optional SEED_PUUIDS / SEED_SUMMONERS |
 | 🧬 **Rich Reference Data** | Champions with roles, items, and summoner spells from Data Dragon |
 | 📋 **Enterprise Logging** | Colored console + structured JSON logs with context binding |
-| 🩺 **Health System** | DNS + HTTP checks with Adaptive Retry and Circuit Breaker |
+| 🩺 **Health Tools** | Simple API key / DNS / platform health checks |
 | 🗑️ **Data Management** | Interactive CLI + programmatic table clearing |
 
 ---
@@ -69,20 +69,24 @@ riot_data_scraper/
 │
 ├── 🏗️  infrastructure/             # External integrations
 │   ├── api/riot_client.py          # Async Riot API client
-│   └── repositories/               # SQLite repository implementations
+│   ├── repositories/               # SQLite repository implementations
+│   ├── health/                     # DNS/API/platform helpers
+│   └── notifications/              # Windows desktop notifications
 │
 ├── 🔧 application/                 # Orchestration layer
 │   ├── services/
 │   │   ├── data_scraper/           # Core scraping logic
 │   │   ├── seed/                   # Seed discovery service
 │   │   ├── delete_data/            # Data deletion service
-│   │   ├── health/                 # DNS/HTTP checkers, retry policy, breaker, manager
-│   │   └── data_persistence_service.py
+│   │   ├── data_persistence_service.py  # DB + CSV export + scrape_sessions
+│   │   └── region_scrape_runner.py # Region-level orchestration for scrapes
 │   └── use_cases/                  # Business use cases (e.g., scrape_matches.py)
 │
 ├── 🖥️  presentation/cli/           # Console UI commands
-│   ├── scraping_command.py         # Scraping command
-│   ├── health_command.py           # Health command
+│   ├── scraping_command.py         # Main scraping command (supports resume)
+│   ├── targeted_scrape_command.py  # Targeted single-server / start-from-server scrape
+│   ├── health_command.py           # Health tools (API key / DNS / platforms)
+│   ├── notifications_command.py    # Notification settings (toggle + test)
 │   ├── delete_data_command.py      # Delete data command
 │   └── db_check_command.py         # DB check command
 │
@@ -133,6 +137,21 @@ riot_data_scraper/
   - `items` and `summoner_spells` are seeded from Data Dragon with human-readable names.
 - **Role normalization**
   - Role enum maps common aliases (`SUP`, `UTILITY`, `ADC`, `BOT`, `MID`, `JG`) into canonical roles like `SUPPORT` and `BOTTOM`.
+
+- **Session-aware scraping**
+  - Each run is tracked in `scrape_sessions` and `scrape_session_regions`.
+  - On startup, incomplete sessions are detected and you can choose:
+    - `Resume latest` → skip already completed regions and continue where you stopped.
+    - `Start fresh` → mark old sessions as interrupted and start a clean run.
+  - Completed regions are skipped with clear messages (e.g. `EUNE already completed (3,020 matches)`).
+
+- **Desktop notifications (Windows)**
+  - Optional Windows toast + sound via `Notifier` (uses `winotify` + `winsound` when available).
+  - Notifications on:
+    - Region complete (`✓ Region Complete` with match count and duration).
+    - All regions complete (`🏆 Scrape Complete` with total matches and total time).
+    - Region errors (`⚠ Scrape Error` with summary).
+  - Notification and sound toggles are available in the main menu under "Notifications settings".
 
 ---
 
@@ -198,6 +217,9 @@ TARGET_PATCH="16.3" MATCHES_PER_REGION="2500" python -u main.py
 - 📡 Per-region progress: `Server → Next Server` with a live progress bar
 - ✅ On completion: total matches collected, DB save notice, CSV export notice
 - ▶️ Choosing `4) Scraping` starts scraping all servers automatically (sequential loop)
+- 🩺 Choosing `2) Health check` opens API key / DNS / platform health tools
+- 🔔 Choosing `5) Notifications settings` toggles toast/sound and sends a test notification
+- 🎯 Choosing `6) Targeted scrape` runs a focused scrape for a single server, or from a chosen server onward
 
 ---
 
@@ -234,7 +256,7 @@ TARGET_PATCH="16.3" MATCHES_PER_REGION="2500" python -u main.py
 ```
 data/
 ├── db/
-│   └── scraper.sqlite                  ← single source of truth
+│   └── scraper.sqlite                  ← main database (matches + sessions metadata)
 └── csv/
     ├── matches.csv                     ← match-level data
     ├── teams.csv                       ← team outcomes
@@ -246,6 +268,13 @@ data/
     ├── summoner_spells.csv             ← spell reference table
     └── platforms.csv                   ← platform reference table
 ```
+
+The SQLite database also contains:
+
+- `scrape_sessions` — one row per scrape run (status, regions, target, patch).
+- `scrape_session_regions` — per-region progress for each session (pending/running/completed/skipped).
+
+These tables drive the **resume** experience in the scraping CLI.
 
 ---
 
@@ -294,22 +323,42 @@ def compute(a: int, b: int) -> int:
 
 ## 🩺 Health Check
 
-Check DNS and HTTP status for platform hosts with Adaptive Retry and Circuit Breaker.
+From the main menu choose `2) Health check` to open the health tools:
 
-```powershell
-python -u .\scripts\health.py
-```
+- **1) Check API key / status**
+  - Calls `/lol/status/v4/platform-data` on a small set of core platforms.
+  - Confirms whether `RIOT_API_KEY` is present and capable of returning `200` responses.
+  - Summarises the result:
+    - At least one `200` → key appears valid.
+    - All `401` → key is invalid or expired.
 
-- 1) Check specific platforms (supports `all` and `sea`)
-- 2) Toggle JSON output
-- 3) Toggle Fail-Fast (stop on first failure)
-- 4) Settings: cache TTL, default status path, circuit breaker threshold & reset
+- **2) Check Riot DNS**
+  - Verifies DNS resolution for:
+    - `api.riotgames.com`
+    - `europe.api.riotgames.com`, `americas.api.riotgames.com`, `asia.api.riotgames.com`
+    - `{platform}.api.riotgames.com` for each known platform (`euw1`, `eun1`, `na1`, …).
+  - Helpful when some regions fail due to DNS issues on the host machine.
 
-Env tuning:
-- `HEALTH_CACHE_TTL_S` — cache window (seconds)
-- `HEALTH_PATH` — status path (default `/lol/status/v4/platform-data`)
-- `HEALTH_RETRY_*` — attempts, backoff ms, factor, jitter
-- To see logs in console: set `LOG_CONSOLE=true`. To show only warnings/errors: add `LOG_CONSOLE_LEVEL=WARNING` (or `ERROR`).
+- **3) Check specific platforms**
+  - Lets you pick one or more platforms by number (or `all`).
+  - Performs DNS checks for `{platform}.api.riotgames.com` only on the selected platforms.
+
+---
+
+## 🔔 Notifications
+
+From the main menu choose `5) Notifications settings`:
+
+- Shows current status:
+  - `Notifications` ON/OFF
+  - `Sound` ON/OFF
+- Options:
+  - `1) Toggle notifications` — enable/disable desktop toasts.
+  - `2) Toggle sound` — enable/disable sounds while keeping toasts.
+  - `3) Test notification` — sends a real test toast + sound using the current settings.
+
+Settings are stored in `data/notifications.json` and are respected by the `Notifier` used
+by the scraping command for region-complete and all-complete events.
 
 ## 🗑️ Data Management
 

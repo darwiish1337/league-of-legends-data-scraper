@@ -1,7 +1,8 @@
 import sqlite3
 from pathlib import Path
 import csv
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+from datetime import datetime
 import httpx
 from domain.entities import Match
 from domain.enums import Role
@@ -41,6 +42,33 @@ class DataPersistenceService:
         cur.execute("CREATE TABLE IF NOT EXISTS participant_summoner_spells (match_id TEXT, participant_id INTEGER, slot INTEGER, spell_id INTEGER, PRIMARY KEY(match_id, participant_id, slot), FOREIGN KEY(match_id, participant_id) REFERENCES participants(match_id, participant_id), FOREIGN KEY(spell_id) REFERENCES summoner_spells(spell_id))")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_participants_puuid ON participants(puuid)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_participants_match ON participants(match_id)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scrape_sessions (
+                session_id TEXT PRIMARY KEY,
+                started_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                regions TEXT NOT NULL,
+                target INTEGER NOT NULL,
+                patch TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scrape_session_regions (
+                session_id TEXT NOT NULL,
+                region TEXT NOT NULL,
+                status TEXT NOT NULL,
+                matches_collected INTEGER DEFAULT 0,
+                started_at TEXT,
+                completed_at TEXT,
+                PRIMARY KEY (session_id, region),
+                FOREIGN KEY (session_id) REFERENCES scrape_sessions(session_id)
+            )
+            """
+        )
         self._conn.commit()
         try:
             cols = {c[1] for c in cur.execute("PRAGMA table_info(matches)").fetchall()}
@@ -390,3 +418,128 @@ class DataPersistenceService:
             return [r[0] for r in rows if r and r[0]]
         except Exception:
             return []
+
+    # ── Session management ────────────────────────────────────────────────
+
+    def _now_iso(self) -> str:
+        return datetime.utcnow().isoformat(timespec="seconds")
+
+    def create_session(self, session_id: str, regions: List[str], target: int, patch: str) -> None:
+        now = self._now_iso()
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT OR REPLACE INTO scrape_sessions
+            (session_id, started_at, updated_at, status, regions, target, patch)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (session_id, now, now, "running", ",".join(regions), int(target), patch),
+        )
+        rows = [(session_id, r, "pending", 0, None, None) for r in regions]
+        cur.executemany(
+            """
+            INSERT OR IGNORE INTO scrape_session_regions
+            (session_id, region, status, matches_collected, started_at, completed_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        self._conn.commit()
+
+    def update_session_status(self, session_id: str, status: str) -> None:
+        cur = self._conn.cursor()
+        cur.execute(
+            "UPDATE scrape_sessions SET status = ?, updated_at = ? WHERE session_id = ?",
+            (status, self._now_iso(), session_id),
+        )
+        self._conn.commit()
+
+    def mark_region_running(self, session_id: str, region_value: str) -> None:
+        cur = self._conn.cursor()
+        now = self._now_iso()
+        cur.execute(
+            """
+            UPDATE scrape_session_regions
+            SET status = 'running', started_at = COALESCE(started_at, ?)
+            WHERE session_id = ? AND region = ?
+            """,
+            (now, session_id, region_value),
+        )
+        self._conn.commit()
+
+    def mark_region_completed(self, session_id: str, region_value: str, matches_collected: int) -> None:
+        cur = self._conn.cursor()
+        now = self._now_iso()
+        cur.execute(
+            """
+            UPDATE scrape_session_regions
+            SET status = 'completed',
+                matches_collected = ?,
+                completed_at = ?
+            WHERE session_id = ? AND region = ?
+            """,
+            (int(matches_collected), now, session_id, region_value),
+        )
+        self._conn.commit()
+
+    def mark_region_skipped(self, session_id: str, region_value: str) -> None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE scrape_session_regions
+            SET status = 'skipped'
+            WHERE session_id = ? AND region = ?
+            """,
+            (session_id, region_value),
+        )
+        self._conn.commit()
+
+    def get_incomplete_sessions(self) -> List[Dict[str, Any]]:
+        cur = self._conn.cursor()
+        rows = cur.execute(
+            """
+            SELECT session_id, started_at, updated_at, status, regions, target, patch
+            FROM scrape_sessions
+            WHERE status IN ('running', 'interrupted')
+            ORDER BY started_at DESC
+            """
+        ).fetchall()
+        result: List[Dict[str, Any]] = []
+        for r in rows:
+            result.append(
+                {
+                    "session_id": r[0],
+                    "started_at": r[1],
+                    "updated_at": r[2],
+                    "status": r[3],
+                    "regions": r[4],
+                    "target": r[5],
+                    "patch": r[6],
+                }
+            )
+        return result
+
+    def get_session_regions(self, session_id: str) -> List[Dict[str, Any]]:
+        cur = self._conn.cursor()
+        rows = cur.execute(
+            """
+            SELECT session_id, region, status, matches_collected, started_at, completed_at
+            FROM scrape_session_regions
+            WHERE session_id = ?
+            ORDER BY region
+            """,
+            (session_id,),
+        ).fetchall()
+        result: List[Dict[str, Any]] = []
+        for r in rows:
+            result.append(
+                {
+                    "session_id": r[0],
+                    "region": r[1],
+                    "status": r[2],
+                    "matches_collected": r[3],
+                    "started_at": r[4],
+                    "completed_at": r[5],
+                }
+            )
+        return result

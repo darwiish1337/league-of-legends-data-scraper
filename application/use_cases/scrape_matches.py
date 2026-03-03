@@ -1,4 +1,4 @@
-"""Use case for scraping match data - per-region PUUID isolation."""
+"""Use case for scraping match data with per-region PUUID isolation."""
 from __future__ import annotations
 
 import asyncio
@@ -16,18 +16,11 @@ logger = logging.getLogger(__name__)
 
 class ScrapeMatchesUseCase:
     """
-    Scrapes matches region by region.
+    Scrapes ranked matches region by region.
 
-    PUUID isolation (KEY FIX):
-    ─────────────────────────────────────────────────────────────────
-    scraped_match_ids  →  GLOBAL  (never re-download the same match)
-    scraped_puuids     →  PER-REGION  (EUW players don't play on EUNE)
-    processed_puuids   →  PER-REGION  (fresh start each region)
-
-    Without this isolation, after EUW finishes with ~6,000 PUUIDs,
-    EUNE would try all of them on its servers → 0 matches found →
-    wastes thousands of API calls before finding real EUNE seeds.
-    ─────────────────────────────────────────────────────────────────
+    Match IDs are tracked globally to avoid re-downloading the same game.
+    PUUID pools are scoped per region so seeds from one server do not
+    pollute others.
     """
 
     def __init__(

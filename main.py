@@ -45,7 +45,14 @@ def _print_logo() -> None:
 def _menu() -> None:
     _print_logo()
     # Lazy imports here — avoids any circular-import risk at module level
-    from presentation.cli import ScrapingCommand, HealthCommand, DeleteDataCommand, DBCheckCommand
+    from presentation.cli import (
+        ScrapingCommand,
+        TargetedScrapeCommand,
+        NotificationsCommand,
+        HealthCommand,
+        DeleteDataCommand,
+        DBCheckCommand,
+    )
 
     while True:
         cols = shutil.get_terminal_size(fallback=(96, 20)).columns
@@ -56,7 +63,9 @@ def _menu() -> None:
         print(f"  {_c('2')}  Health check")
         print(f"  {_c('3')}  DB check")
         print(f"  {_c('4')}  Scraping")
-        print(f"  {_c('5')}  Exit")
+        print(f"  {_c('5')}  Notifications settings")
+        print(f"  {_c('6')}  Targeted scrape")
+        print(f"  {_c('7')}  Exit")
         print(_g("─" * min(cols, 48)))
         choice = input("  Choose: ").strip()
 
@@ -71,6 +80,11 @@ def _menu() -> None:
             import asyncio
             asyncio.run(ScrapingCommand().run())
         elif choice == "5":
+            NotificationsCommand().run()
+        elif choice == "6":
+            import asyncio
+            asyncio.run(TargetedScrapeCommand().run())
+        elif choice == "7":
             print(f"\n  {_g('Goodbye!')}\n")
             break
         else:
