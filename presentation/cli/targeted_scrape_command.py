@@ -8,7 +8,7 @@ from typing import List, Optional
 from config import settings
 from domain.enums import Region, QueueType
 from infrastructure import RiotAPIClient
-from infrastructure.utils.dns_checker import DNSChecker
+from infrastructure.health import DNSChecker
 from application.services import DataPersistenceService, RegionScrapeRunner
 from core.logging.logger import get_logger
 from .scraping_command import (
@@ -168,6 +168,11 @@ class TargetedScrapeCommand:
             print(f"  CSV : {_c(str(settings.CSV_DIR))}")
             print(_g("═" * min(cols_end, 96)))
             self._log.info(f"target-all-done total={total_all}")
+        # always close the persistence connection opened for this command
+        try:
+            persistence._conn.close()
+        except Exception:
+            pass
 
     async def _single_server(self) -> None:
         region = self._choose_region_ui()
@@ -205,4 +210,3 @@ class TargetedScrapeCommand:
                 break
             else:
                 print(f"  {_y('Invalid option.')}")
-

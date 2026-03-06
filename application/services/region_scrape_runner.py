@@ -27,6 +27,7 @@ class RegionScrapeRunner:
         target: int,
         progress_cb: ProgressCallback,
         seeds_ready_cb: SeedsReadyCallback = None,
+        session_id: str | None = None,
     ) -> List[Match]:
         db_seeds: List[str] = []
         try:
@@ -40,6 +41,10 @@ class RegionScrapeRunner:
             self._api_client,
             progress_callback=progress_cb,
             status_callback=lambda _: None,
+            persistence=self._persistence,
+            session_id=session_id,
+            # session rows store uppercase names (Region.name), not .value
+            region_value=region.name,
         )
         results = await use_case.execute(
             regions=[region],

@@ -69,6 +69,7 @@ class DataPersistenceService:
             )
             """
         )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_scrape_sessions_status ON scrape_sessions(status)")
         self._conn.commit()
         try:
             cols = {c[1] for c in cur.execute("PRAGMA table_info(matches)").fetchall()}
@@ -491,6 +492,25 @@ class DataPersistenceService:
             WHERE session_id = ? AND region = ?
             """,
             (session_id, region_value),
+        )
+        self._conn.commit()
+
+    def update_region_progress(self, session_id: str, region_value: str, matches_collected: int) -> None:
+        """Record an intermediate progress count for a running region.
+
+        This is used when the scraper persists batches incrementally so that a
+        crash mid-region still leaves a sensible count in the session table.  A
+        later resume will reload the existing match IDs from the database and
+        continue from where it left off.
+        """
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE scrape_session_regions
+            SET matches_collected = ?
+            WHERE session_id = ? AND region = ?
+            """,
+            (int(matches_collected), session_id, region_value),
         )
         self._conn.commit()
 

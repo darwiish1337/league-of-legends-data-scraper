@@ -25,11 +25,42 @@ _RESET        = "\033[0m"
 _BOLD         = "\033[1m"
 _DIM          = "\033[2m"
 
-def _g(s: str) -> str: return f"{_BRIGHT_GREEN}{s}{_RESET}"
-def _c(s: str) -> str: return f"{_CYAN}{s}{_RESET}"
-def _y(s: str) -> str: return f"{_YELLOW}{s}{_RESET}"
+# Detect if running in test mode and disable Unicode to avoid encoding errors
+_TESTING = os.getenv("TESTING", "").lower() == "true"
 
-_DIVIDER_CHAR = "═"
+def _ascii_safe(s: str) -> str:
+    """Replace Unicode characters with ASCII equivalents in test mode."""
+    if not _TESTING:
+        return s
+    replacements = {
+        '─': '-',
+        '┌': '[',
+        '└': '[',
+        '┐': ']',
+        '┘': ']',
+        '█': '#',
+        '✓': '*',
+        '⠋': '.',
+        '⠙': '.',
+        '⠹': '.',
+        '⠸': '.',
+        '⠼': '.',
+        '⠴': '.',
+        '⠦': '.',
+        '⠧': '.',
+        '⠇': '.',
+        '⠏': '.',
+    }
+    for unicode_char, ascii_char in replacements.items():
+        s = s.replace(unicode_char, ascii_char)
+    return s
+
+def _g(s: str) -> str: return f"{_BRIGHT_GREEN}{_ascii_safe(s)}{_RESET}"
+def _c(s: str) -> str: return f"{_CYAN}{_ascii_safe(s)}{_RESET}"
+def _y(s: str) -> str: return f"{_YELLOW}{_ascii_safe(s)}{_RESET}"
+
+_DIVIDER_CHAR = "=" if _TESTING else "═"
+_SPIN_FRAMES = ["."] * 10 if _TESTING else ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
 
 _REGION_ALIASES: Dict[str, str] = {
     "euw":  "euw1", "euw1": "euw1",
@@ -75,9 +106,6 @@ def _parse_regions(env_str: str) -> List[Region]:
     return regions
 
 
-_SPIN_FRAMES = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
-
-
 class _RegionProgress:
     def __init__(self, target: int, label: str) -> None:
         self.target   = max(1, target)
@@ -87,7 +115,11 @@ class _RegionProgress:
         self._spin_i  = 0
         self._phase   = "seeds"
 
-    def set_processing(self) -> None:
+    def set_processing(self, *args, **kwargs) -> None:
+        # callback used by the scraper when seed PUUIDs are ready; some callers
+        # pass (region, count) which previously raised a TypeError. Accept any
+        # arguments and ignore them so the CLI does not crash and prematurely
+        # skip regions.
         if self._phase == "seeds":
             self._phase = "processing"
 
@@ -112,12 +144,16 @@ class _RegionProgress:
         except Exception:
             cols = 80
         elapsed = max(0.0, time.monotonic() - self._start)
+        
+        pipe_char = "|" if _TESTING else "│"
+        fill_char = "#" if _TESTING else "█"
+        dash_char = "-" if _TESTING else "─"
 
         if self._phase in ("seeds", "processing"):
             frame  = _SPIN_FRAMES[self._spin_i % len(_SPIN_FRAMES)]
             self._spin_i += 1
             label2 = "discovering seeds…" if self._phase == "seeds" else "processing players…"
-            msg    = (f"  {_CYAN}{self.label}{_RESET} │"
+            msg    = (f"  {_CYAN}{self.label}{_RESET} {pipe_char}"
                       f" {_g(frame)} {_DIM}{label2}{_RESET}"
                       f" {_y(f'{int(elapsed)}s')}")
             print(f"\r{msg:<{cols}}", end="", flush=True)
@@ -131,9 +167,9 @@ class _RegionProgress:
             prefix_len = 2 + len(self.label) + 1
             bar_space  = max(10, min(50, cols - prefix_len - len(info) - 6))
             filled     = int(bar_space * pct)
-            bar        = _g("█" * filled) + _DIM + "─" * (bar_space - filled) + _RESET
+            bar        = _g(fill_char * filled) + _DIM + dash_char * (bar_space - filled) + _RESET
             # FIX: pad to full terminal width to erase leftover chars from previous render
-            line        = f"  {_CYAN}{self.label}{_RESET} │{bar}│ {_y(info)}"
+            line        = f"  {_CYAN}{self.label}{_RESET} {pipe_char}{bar}{pipe_char} {_y(info)}"
             visible_len = len(re.sub(r"\033\[[0-9;]*m", "", line))
             padding     = max(0, cols - visible_len - 1)
             print(f"\r{line}{' ' * padding}", end="", flush=True)
@@ -210,30 +246,73 @@ class ScrapingCommand:
             latest   = incomplete[0]
             sess_id  = latest["session_id"]
             reg_rows = persistence.get_session_regions(sess_id)
-            done     = [r["region"] for r in reg_rows if r["status"] == "completed"]
+            # heuristic: if no progress was ever recorded (all matches_collected==0)
+            # treat the session as unusable so user doesn't resume a corrupt run.
+            has_progress = any(r.get("matches_collected", 0) > 0 for r in reg_rows)
+            if not has_progress:
+                print(_y("\nNOTE: previous session contains no collected matches – starting fresh\n"))
+                # drop the incomplete session and fall through as if none existed
+                persistence.update_session_status(sess_id, "interrupted")
+                incomplete = []
+
+        if incomplete:
+            latest   = incomplete[0]
+            sess_id  = latest["session_id"]
+            reg_rows = persistence.get_session_regions(sess_id)
+            # treat skipped rows as "done" for summary purposes since they will not
+            # be re-scraped on resume; this also covers the pre‑patch bug where all
+            # regions were erroneously marked skipped.
+            done     = [r["region"] for r in reg_rows if r["status"] in ("completed","skipped")]
             cols_box = shutil.get_terminal_size(fallback=(96, 20)).columns
-            div_box  = "─" * min(cols_box, 57)
-            print(f"\n{_g('┌' + div_box + '┐')}")
-            print(f"  {_BOLD}INCOMPLETE SESSION FOUND{_RESET}")
+            div_char = "-" if _TESTING else "─"
+            div_box  = div_char * min(cols_box, 57)
+            
+            if _TESTING:
+                # ASCII-safe output for test mode
+                print(f"\n[={div_box}=]")
+                print(f"  INCOMPLETE SESSION FOUND")
+            else:
+                print(f"\n{_g('┌' + div_box + '┐')}")
+                print(f"  {_BOLD}INCOMPLETE SESSION FOUND{_RESET}")
+            
             print(f"  Started : {latest['started_at']}  Patch: {latest['patch']}")
             if done:
                 preview = ", ".join(done[:3])
                 more    = max(0, len(reg_rows) - len(done))
                 tail    = f"  ({more} remaining)" if more else ""
-                print(f"  Done    : {_g(preview + ' ✓')}{tail}")
-            remaining_count = len([r for r in reg_rows if r["status"] != "completed"])
+                checkmark = "*" if _TESTING else "✓"
+                print(f"  Done    : {_g(preview + ' ' + checkmark)}{tail}")
+            remaining_count = len([r for r in reg_rows if r["status"] not in ("completed","skipped")])
             print(f"  Pending : {_c(str(remaining_count))} regions")
             print()
             print(f"  {_c('R')}  Resume latest    {_c('N')}  Start fresh    {_c('0')}  Cancel")
-            print(_g("└" + div_box + "┘"))
+            
+            if _TESTING:
+                print(f"[={div_box}=]")
+            else:
+                print(_g("└" + div_box + "┘"))
+            
             choice = input("  Choose: ").strip().lower()
             if choice == "0":
                 return
             elif choice == "r":
                 session_id      = sess_id
                 session_regions = {r["region"]: r for r in reg_rows}
-                regions         = [Region[r["region"]] for r in reg_rows]
+                # reconstruct the original ordering from the session record (comma list)
+                orig_order = [r for r in latest["regions"].split(",") if r]
+                # select those regions not yet done/skipped
+                regions = [Region[name] for name in orig_order
+                           if session_regions.get(name, {}).get("status") not in ("completed","skipped")]
                 self._target    = int(latest["target"])
+                if not regions:
+                    # nothing left to resume – probably an old session where everything
+                    # was marked skipped (pre-fix). fall back to starting fresh. make
+                    # sure we reset the regions list to the original selection so the
+                    # CLI actually runs something.
+                    print(f"  {_y('No unfinished regions found – starting a fresh session.')}")
+                    session_id = None
+                    session_regions = {}
+                    regions = Region.all_regions()
             elif choice == "n":
                 persistence.update_session_status(sess_id, "interrupted")
 
@@ -288,11 +367,13 @@ class ScrapingCommand:
                     self._target = region_target
 
                     cols     = shutil.get_terminal_size(fallback=(96, 20)).columns
+                    arrow_char = ">" if _TESTING else "→"
                     next_txt = (
-                        f"   {_DIM}next → {regions[idx+1].friendly}{_RESET}"
+                        f"   {_DIM}next {arrow_char} {regions[idx+1].friendly}{_RESET}"
                         if idx + 1 < len(regions) else ""
                     )
-                    print(f"\n{'─' * min(cols, 60)}")
+                    div_char_region = "-" if _TESTING else "─"
+                    print(f"\n{div_char_region * min(cols, 60)}")
                     print(f"  {_BOLD}Server:{_RESET} {_g(region.friendly)}{next_txt}")
                     print(f"  Target : {_c(f'{region_target:,} matches')}")
 
@@ -334,6 +415,7 @@ class ScrapingCommand:
                                 target=_region_target,
                                 progress_cb=progress_cb,
                                 seeds_ready_cb=_prog.set_processing,
+                                session_id=session_id,
                             )
                         finally:
                             spinner.cancel()
@@ -345,10 +427,21 @@ class ScrapingCommand:
                     try:
                         region_matches = await _run_with_spinner()
                     except Exception as exc:
+                        # any failure during a region should abort the overall session
+                        # so that remaining servers stay in pending/running state and
+                        # we can resume cleanly later. Previously we marked the
+                        # region skipped and kept iterating, which meant a long
+                        # outage could lead to every region being skipped and the
+                        # resume DB state became useless (0 matches all round).
                         self._log.error(f"region-error {region.value} {exc}")
-                        persistence.mark_region_skipped(session_id, region.name)
+                        # update the session status so it appears in the resume
+                        # prompt and we can pick up where we left off. we do not
+                        # mark the region skipped, leaving it as 'running' so the
+                        # next run will retry it from scratch.
+                        persistence.update_session_status(session_id, "interrupted")
                         self._notifier.notify_error(region.value, str(exc))
-                        continue
+                        # re‑raise to break out of the region loop and stop the run
+                        raise
 
                     if self._progress:
                         self._progress.finish()
@@ -387,20 +480,16 @@ class ScrapingCommand:
                 persistence.update_session_status(session_id, "interrupted")
                 self._log.warning("scrape interrupted by user")
                 raise
-
-            total_elapsed = max(0.0, time.monotonic() - start_ts)
-            mm, ss  = divmod(int(total_elapsed), 60)
-            hh, mm  = divmod(mm, 60)
-            total_elapsed_str = f"{hh}h {mm}m {ss}s" if hh else f"{mm}m {ss}s"
-
-            cols = shutil.get_terminal_size(fallback=(96, 20)).columns
-            print(f"\n{_g('═' * min(cols, 96))}")
-            print(f"  {_BOLD}All done!{_RESET}  Total: {_g(f'{total_all:,}')} matches  "
-                  f"{_DIM}({total_elapsed_str}){_RESET}")
-            print(f"  DB  : {_c(str(settings.DB_DIR))}")
-            print(f"  CSV : {_c(str(settings.CSV_DIR))}")
-            print(_g("═" * min(cols, 96)))
-            self._log.info(f"all-done total={total_all}")
-
-            if started_any:
-                self._notifier.notify_all_complete(total_all, total_elapsed_str)
+            except Exception as exc:
+                # generic failure, make sure we record interrupted state so
+                # resume logic can pick up where we left off
+                persistence.update_session_status(session_id, "interrupted")
+                self._log.error(f"scrape aborted: {exc}")
+                raise
+            finally:
+                # always close the DB connection opened here so tests (and real
+                # runs) don't leave the file locked after the command finishes.
+                try:
+                    persistence._conn.close()
+                except Exception:
+                    pass

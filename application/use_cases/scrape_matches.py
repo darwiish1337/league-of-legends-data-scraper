@@ -28,19 +28,27 @@ class ScrapeMatchesUseCase:
         api_client: RiotAPIClient,
         progress_callback=None,
         status_callback=None,
+        persistence: DataPersistenceService | None = None,
+        session_id: str | None = None,
+        region_value: str | None = None,
     ):
         self.api_client    = api_client
         self.match_repo    = MatchRepository(api_client)
         self.summoner_repo = SummonerRepository(api_client)
         self._progress_cb  = progress_callback
         self._status_cb    = status_callback
+        # optional persistence info used for incremental saving
+        self._persistence  = persistence
+        self._session_id   = session_id
+        self._region_value = region_value
 
-        # Only match IDs are global — prevents re-fetching the same match
+        # Only match IDs are global — prevents re-downloading the same match
         self._global_match_ids: set = set()
         try:
-            from application.services.data_persistence_service import DataPersistenceService
-            p = DataPersistenceService(settings.DB_DIR / "scraper.sqlite")
-            self._global_match_ids.update(p.get_existing_match_ids())
+            if self._persistence is None:
+                from application.services.data_persistence_service import DataPersistenceService
+                self._persistence = DataPersistenceService(settings.DB_DIR / "scraper.sqlite")
+            self._global_match_ids.update(self._persistence.get_existing_match_ids())
         except Exception:
             pass
 
@@ -128,6 +136,23 @@ class ScrapeMatchesUseCase:
                     continue
                 cap    = max(0, matches_per_region - region_total)
                 sliced = res[:cap]
+                # persist any newly fetched matches immediately so that a crash
+                # part–way through the region doesn't lose them and the global
+                # match-ID set is kept up to date for later runs.
+                if self._persistence and sliced:
+                    try:
+                        self._persistence.save_raw_matches(sliced)
+                        # record progress count in session table if available
+                        if self._session_id and self._region_value:
+                            self._persistence.update_region_progress(
+                                self._session_id,
+                                self._region_value,
+                                region_total + len(sliced),
+                            )
+                    except Exception:
+                        # persistence errors shouldn't prevent scraping
+                        logger.exception("error saving intermediate matches")
+
                 region_results[qt.queue_name].extend(sliced)
                 region_total    += len(sliced)
                 total_collected += len(sliced)
